@@ -18,6 +18,7 @@ import { ExternalConnectionSettings } from "./ExternalConnectionSettings";
 import { externalMcpEnabled } from "../../features/agents/external-connection";
 import { forgetMemoryListingsOnSelection } from "../../features/agents/memory";
 import inlineStyles from "../../shared/InlineReference.module.css";
+import { createActivityTab } from "../builderlab/adapter-type/Activity";
 import { gatewayRoutes } from "../../features/agents/gateway/route";
 
 export const inject = [
@@ -38,6 +39,17 @@ export const apply: PluginModule["apply"] = (ctx) => {
   registerDecideTool(ctx.agents, ctx.decisions);
   ctx.effect(() => forgetMemoryListingsOnSelection(ctx.communityReader));
   const { relay, navigation: navigator } = ctx;
+  // Local patch: Buzz's published-activity panel, the Activity tab Builderlab's
+  // hosted agents get, for any hosted type's own Activity tab. Plugins read it
+  // with ctx.reflect.get("publishedActivity")?.component and give it their
+  // tab's props.
+  ctx.provide("publishedActivity", {
+    component: createActivityTab(
+      relay,
+      (section) =>
+        void navigator.open({ version: 1, kind: "settings", section }),
+    ),
+  });
   const agents = developerMode ? withImportScenario(ctx.agents) : ctx.agents;
   if (isTauri()) {
     // Gateway readiness probes go out under this plugin's native grant for
