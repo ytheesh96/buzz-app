@@ -33,11 +33,21 @@ const skippedWatches = (agent: Agent, id: string) =>
       (object.value as { interest_id?: unknown } | null)?.interest_id === id,
   );
 /** Uses the host’s controls and surface roles. */
-export function createAttentionComponents({
-  agents,
-  relay,
-  navigation,
-}: Pick<Context, "agents" | "relay" | "navigation">) {
+/** Local patch: a hosted type's own Attention setting row, in place of the
+ * device-local one: where it runs, and its control (an on/off switch). */
+export type AttentionSetting = (agent: Agent) => Readonly<{
+  subtitle: React.ReactNode;
+  trailing?: React.ReactNode;
+}>;
+
+export function createAttentionComponents(
+  {
+    agents,
+    relay,
+    navigation,
+  }: Pick<Context, "agents" | "relay" | "navigation">,
+  setting?: AttentionSetting,
+) {
   const { Subscription, Destination, Message, Entry } = createWatchComponents({
     agents,
     navigation,
@@ -350,7 +360,9 @@ export function createAttentionComponents({
             )}
             <PreferenceRow
               title="Attention"
-              subtitle={`Let ${agent.name} watch for updates and check in on a schedule. Runs while Buzz is open on this device.`}
+              {...(setting?.(agent) ?? {
+                subtitle: `Let ${agent.name} watch for updates and check in on a schedule. Runs while Buzz is open on this device.`,
+              })}
             />
           </section>
         </SettingsGroup>
@@ -530,6 +542,7 @@ export function createAttentionComponents({
 
 export function createTab(
   context: Pick<Context, "agents" | "relay" | "navigation">,
+  setting?: AttentionSetting,
 ) {
-  return createAttentionComponents(context).WatchingTab;
+  return createAttentionComponents(context, setting).WatchingTab;
 }
