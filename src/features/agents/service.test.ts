@@ -13529,6 +13529,92 @@ it("keeps a hosted agent whose setup failed, and finishes it without making anot
   expect(storage.getItem("buzz.agents.unfinished.v1")).not.toContain(hostedKey);
 });
 
+it("opens owner review for a CLI draft from the owner's own hosted agent (local patch)", async () => {
+  const { service, plugin, session, connect } = await setup({
+    listed: [
+      record(hostedKey, {
+        content: JSON.stringify({ name: "Sky" }),
+        tags: [
+          ["d", hostedKey],
+          ["runtime", "example/cloud"],
+        ],
+      }),
+    ],
+  });
+  const { type, remote } = cloud();
+  plugin.agents.register(type);
+  type Listener = (agent: string, request: Record<string, unknown>) => void;
+  const listeners = new Set<Listener>();
+  const release = vi.fn();
+  Object.assign(session, {
+    agentActivity: {
+      managementRequests: (listener: Listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      activate: () => release,
+    },
+  });
+  connect(false);
+  connect(true);
+  await vi.waitFor(() => expect(listeners.size).toBe(1));
+  await vi.waitFor(() =>
+    expect(service.find(hostedKey)).toMatchObject({ place: "hosted" }),
+  );
+  const requestId = "34aeaccc-c83b-4422-beac-a4b8661f9f59";
+  const draft = (
+    from: string,
+    request: Record<string, unknown>,
+    action = "create",
+  ) => {
+    for (const listener of listeners)
+      listener(from, {
+        kind: "agent_management_request",
+        channelId: channel,
+        payload: {
+          type: "agent_management_request",
+          action,
+          requestId,
+          request: { channelId: channel, ...request },
+        },
+      });
+  };
+  // Not the owner's agent, no name, or not a creation: dropped.
+  draft(other, { displayName: "Nope", systemPrompt: "x" });
+  draft(hostedKey, { systemPrompt: "x" });
+  draft(hostedKey, { agentName: "Sky", displayName: "Nope" }, "update");
+  expect(service.creationRequests()).toEqual([]);
+  draft(hostedKey, { displayName: " Otter ", systemPrompt: "Scout jobs." });
+  draft(hostedKey, { displayName: "Otter", systemPrompt: "Scout jobs." });
+  expect(service.creationRequests()).toEqual([
+    {
+      id: requestId,
+      requester: hostedKey,
+      requesterName: "Sky",
+      owner: viewer,
+      community: "https://relay.example.test",
+      type: "example/cloud",
+      name: "Otter",
+      instructions: "Scout jobs.",
+    },
+  ]);
+  // Approving makes it at the provider, as a manual create does.
+  remote.provision.mockResolvedValueOnce({ pubkey: "d".repeat(64) });
+  await service.approveCreation(requestId, {
+    type: "example/cloud",
+    name: "Otter",
+  });
+  expect(remote.provision).toHaveBeenLastCalledWith({
+    name: "Otter",
+    community: "wss://relay.example.test",
+    signal: expect.any(AbortSignal),
+  });
+  expect(service.creationRequests()).toEqual([]);
+  connect(false);
+  expect(release).toHaveBeenCalled();
+  expect(listeners.size).toBe(0);
+});
+
 it("retains hosted creation settings across restart and retries without provisioning another agent", async () => {
   const storage = memoryStorage();
   const first = await setup({ storage });

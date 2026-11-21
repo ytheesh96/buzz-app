@@ -40,6 +40,21 @@ function fixture(change: Partial<AgentCreationRequest> = {}) {
         reply: carry.instructions ?? saved.reply,
       }),
     },
+    {
+      key: "test/cloud",
+      title: "Cloud",
+      remote: {},
+      defaults: () => ({ config: { reply: "hosted" } }),
+      adopt: (carry: { instructions?: string }, saved: { reply: string }) => ({
+        reply: carry.instructions ?? saved.reply,
+      }),
+    },
+    {
+      key: "test/other-cloud",
+      title: "Other cloud",
+      remote: {},
+      defaults: () => ({ config: {} }),
+    },
   ] as unknown as readonly RegisteredAgentType[];
   const agents = {
     subscribe: (listener: () => void) => {
@@ -119,4 +134,24 @@ it("dismisses an unsaved request when the owner closes its review", async () => 
   );
   expect(agents.approveCreation).not.toHaveBeenCalled();
   expect(agents.create).not.toHaveBeenCalled();
+});
+
+it("offers a hosted agent's draft its own hosted type, and no other (local patch)", async () => {
+  const user = userEvent.setup();
+  const agents = fixture({ type: "test/cloud", instructions: "Scout jobs." });
+  await screen.findByDisplayValue("Child");
+  expect(screen.queryByText("Other cloud")).toBeNull();
+  await user.click(screen.getByRole("button", { name: /^Create agent$/ }));
+  // The same introduction a manually created remote agent gets.
+  await user.click(await screen.findByRole("button", { name: /Let’s go/ }));
+  await waitFor(() =>
+    expect(agents.approveCreation).toHaveBeenCalledWith(
+      "draft",
+      expect.objectContaining({
+        name: "Child",
+        type: "test/cloud",
+        config: { reply: "Scout jobs." },
+      }),
+    ),
+  );
 });

@@ -144,6 +144,10 @@ export function createAgentActivity(
   const turns = new Map<string, Turn>();
   const typing = new Map<string, Typing>();
   const listeners = new Set<() => void>();
+  /** Owner review of an agent's `buzz agents draft-create` request (local patch). */
+  const managementListeners = new Set<
+    (agent: string, request: Record<string, unknown>) => void
+  >();
   const workingListeners = new Set<() => void>();
   let workingChannels = "[]";
   let snapshot: Snapshot = Object.freeze({
@@ -443,7 +447,11 @@ export function createAgentActivity(
     const envelope = object(raw);
     // Management requests belong only to live owner review, never the activity
     // display.
-    if (envelope?.kind === "agent_management_request") return;
+    if (envelope?.kind === "agent_management_request") {
+      for (const listener of managementListeners)
+        listener(frame.agent, envelope);
+      return;
+    }
     const children =
       envelope?.kind === "batch" ? object(envelope.payload)?.events : undefined;
     const items = Array.isArray(children) ? children : [raw];
@@ -542,6 +550,17 @@ export function createAgentActivity(
         listeners.add(listener);
         return () => {
           listeners.delete(listener);
+        };
+      },
+      /** Agent management requests (`buzz agents draft-create`) from any
+       * sender, for the owner's review to check and admit (local patch). */
+      managementRequests(
+        listener: (agent: string, request: Record<string, unknown>) => void,
+      ) {
+        if (closed) return () => {};
+        managementListeners.add(listener);
+        return () => {
+          managementListeners.delete(listener);
         };
       },
       activate() {

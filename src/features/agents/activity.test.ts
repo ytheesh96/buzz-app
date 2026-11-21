@@ -535,6 +535,24 @@ it("keeps agent-management requests out of activity", () => {
   expect(f.snapshot().records).toEqual([]);
   f.activity.dispose();
 });
+it("hands agent-management requests to owner review (local patch)", () => {
+  const f = fixture();
+  const heard: unknown[] = [];
+  const stop = f.activity.queries.managementRequests((from, request) =>
+    heard.push([from, request]),
+  );
+  const draft = f.item("agent_management_request", "draft", {
+    channelId: "34aeaccc-c83b-4422-beac-a4b8661f9f59",
+    payload: { type: "agent_management_request", action: "create" },
+  });
+  f.send(draft);
+  expect(heard).toEqual([[agent, draft]]);
+  expect(f.snapshot().records).toEqual([]);
+  stop();
+  f.send(draft);
+  expect(heard).toHaveLength(1);
+  f.activity.dispose();
+});
 it("associates lifecycle with retained signed triggers and preserves it through completion", () => {
   const root = "b".repeat(64),
     request = "c".repeat(64);

@@ -4602,8 +4602,21 @@ export class AgentsService extends Service implements Agents {
     if (!binding || binding.controller.signal.aborted)
       throw new Error("Connect to the requesting community first");
     if (!input.name.trim()) throw new Error("Name the agent");
+    // Local patch: a hosted type is made at its provider, as `create` does,
+    // which uses the selected community.
+    const hosted = this.types().find(
+      (entry) => entry.key === input.type,
+    )?.remote;
+    if (hosted && this.selectedBinding().origin !== binding.origin)
+      throw new Error("Switch to the requesting community first");
     this.approving.add(id);
     try {
+      if (hosted) {
+        const agent = await this.create(input);
+        this.requests = this.requests.filter((item) => item.id !== id);
+        this.notify();
+        return agent;
+      }
       const agent = await this.add(
         input.type,
         async (native, destination, owner) => ({
@@ -8413,11 +8426,87 @@ export class AgentsService extends Service implements Agents {
     const stopRosters = session.channels.subscribeList?.(() =>
       this.runners.releaseHeld(heard),
     );
+    // Local patch: drafts the viewer's agents send with `buzz agents
+    // draft-create` from wherever they run, hosted ones included. The lease
+    // keeps the owner's observer frames arriving here.
+    const stopDrafts = session.agentActivity?.managementRequests?.(
+      (agent, request) => this.remoteDraft(origin, agent, request),
+    );
+    const releaseActivity = session.agentActivity?.activate?.();
     return () => {
       stopEvents();
       stopStatus();
       stopRosters?.();
+      stopDrafts?.();
+      releaseActivity?.();
     };
+  }
+
+  /** Local patch: a `buzz agents draft-create` request from one of the
+   * viewer's own agents in this community, wherever it runs, opens the same
+   * review as a local agent's agent_create. Anything else is dropped. */
+  private remoteDraft(
+    origin: string,
+    from: string,
+    envelope: Record<string, unknown>,
+  ) {
+    const field = (value: unknown, key: string) =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)[key]
+        : undefined;
+    const payload = field(envelope, "payload");
+    const draft = field(payload, "request");
+    const name = field(draft, "displayName");
+    const instructions = field(draft, "systemPrompt");
+    const requestId = field(payload, "requestId");
+    if (
+      field(payload, "type") !== "agent_management_request" ||
+      field(payload, "action") !== "create" ||
+      typeof name !== "string" ||
+      !name.trim() ||
+      name.trim().length > 120 ||
+      (instructions !== undefined && typeof instructions !== "string") ||
+      (typeof instructions === "string" && instructions.length > 20_000)
+    )
+      return;
+    const viewer = this.communities.snapshot().viewer;
+    const binding = this.bound.get(origin)?.binding;
+    if (!viewer || binding?.viewer !== viewer) return;
+    const requester = this.state.agents.find(
+      (agent) =>
+        agent.pubkey === from &&
+        agent.owner === viewer &&
+        originOf(agent.relay) === origin &&
+        !agent.deleting &&
+        !agent.unfinished,
+    );
+    // Its own type, so a hosted agent proposes one hosted the same way.
+    if (!requester || !this.types().some((t) => t.key === requester.type))
+      return;
+    const id =
+      typeof requestId === "string" && /^[0-9a-f-]{36}$/i.test(requestId)
+        ? requestId
+        : crypto.randomUUID();
+    if (
+      this.requests.some((request) => request.id === id) ||
+      this.pendingRequests() >= 16
+    )
+      return;
+    this.requests = [
+      ...this.requests,
+      {
+        id,
+        requester: from,
+        requesterName: requester.name,
+        owner: viewer,
+        community: origin,
+        type: requester.type,
+        name: name.trim(),
+        ...(typeof instructions === "string" &&
+          instructions.trim() && { instructions }),
+      },
+    ];
+    this.notify();
   }
 
   /** Refreshes the cached `core` memory of each agent running in the
