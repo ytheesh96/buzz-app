@@ -131,3 +131,40 @@ it("discards pending metadata after the mentioned agent changes", async () => {
   });
   expect(result.current.map((choice) => choice.pubkey)).toEqual(["new"]);
 });
+
+it("passes conversation place to type.models and refreshes when place changes", async () => {
+  const seen: Array<{ channelId: string; root?: string } | undefined> = [];
+  const snapshot = {
+    status: "ready",
+    agents: [{ pubkey: "agent", type: "type", name: "Agent" } as Agent],
+  };
+  const types = [
+    {
+      key: "type",
+      models: async (_agent: Agent, place?: { channelId: string; root?: string }) => {
+        seen.push(place);
+        return models(place?.root ? `thread-${place.root}` : `ch-${place?.channelId ?? "none"}`);
+      },
+    },
+  ];
+  const service = {
+    subscribe: () => () => {},
+    snapshot: () => snapshot,
+    types: () => types,
+  } as unknown as Agents;
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <AgentsContext.Provider value={service}>{children}</AgentsContext.Provider>
+  );
+  const { result, rerender } = renderHook(
+    ({ place }) => useMentionModels(["agent"], 0, place),
+    { initialProps: { place: { channelId: "c1" } as { channelId: string; root?: string } }, wrapper },
+  );
+  await waitFor(() => expect(result.current[0]?.current).toBe("ch-c1"));
+  // Fresh object with same channelId/root must not re-fetch.
+  rerender({ place: { channelId: "c1" } });
+  expect(seen).toHaveLength(1);
+  // Switching to a thread refreshes with the new place.
+  rerender({ place: { channelId: "c1", root: "r1" } });
+  await waitFor(() => expect(result.current[0]?.current).toBe("thread-r1"));
+  expect(seen).toEqual([{ channelId: "c1" }, { channelId: "c1", root: "r1" }]);
+});

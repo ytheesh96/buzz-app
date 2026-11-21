@@ -129,6 +129,7 @@ export type MentionModelChoice = Models &
 export function useMentionModels(
   pubkeys: readonly string[],
   retry = 0,
+  place?: SessionPlace,
 ): readonly MentionModelChoice[] {
   const remote = useContext(MentionModelsContext);
   const agents = useContext(AgentsContext);
@@ -144,16 +145,23 @@ export function useMentionModels(
     none,
   );
   const key = [...new Set(pubkeys)].join(":");
+  const channelId = place?.channelId;
+  const root = place?.root;
+  const placeKey = channelId ? `${channelId}\n${root ?? ""}` : "";
   const [resolved, setResolved] = useState<{
     remote: typeof remote;
     snapshot: typeof snapshot;
     types: typeof types;
     key: string;
     retry: number;
+    placeKey: string;
     choices: readonly MentionModelChoice[];
   }>();
   useEffect(() => {
     let current = true;
+    const resolvedPlace: SessionPlace | undefined = channelId
+      ? { channelId, ...(root ? { root } : {}) }
+      : undefined;
     void (
       remote
         ? remote(key ? key.split(":") : []).catch(() => [])
@@ -186,7 +194,7 @@ export function useMentionModels(
                 let found: Models = { current: "", models: [] };
                 let failed = false;
                 try {
-                  if (type.models) found = await type.models(agent);
+                  if (type.models) found = await type.models(agent, resolvedPlace);
                 } catch (error) {
                   failed = true;
                   console.warn(
@@ -209,18 +217,19 @@ export function useMentionModels(
           ).then((choices) => choices.flat())
     ).then((choices) => {
       if (current)
-        setResolved({ remote, snapshot, types, key, retry, choices });
+        setResolved({ remote, snapshot, types, key, retry, placeKey, choices });
     });
     return () => {
       current = false;
     };
-  }, [snapshot, types, key, remote, retry]);
+  }, [snapshot, types, key, remote, retry, channelId, root, placeKey]);
   // Never offer a previous agent/config's choices while the new lookup settles.
   return resolved?.remote === remote &&
     resolved?.snapshot === snapshot &&
     resolved?.types === types &&
     resolved?.key === key &&
-    resolved?.retry === retry
+    resolved?.retry === retry &&
+    resolved?.placeKey === placeKey
     ? resolved.choices
     : key.split(":").flatMap((pubkey) => {
         const agent = snapshot?.agents.find((item) => item.pubkey === pubkey);

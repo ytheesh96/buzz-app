@@ -47,6 +47,9 @@ import {
   MenuPopup,
   MenuRadioGroup,
   MenuRadioItem,
+  MenuSubmenu,
+  MenuSubmenuTrigger,
+  MenuSubmenuPopup,
 } from "../../shared/design-system/ui/Menu";
 import { Tooltip } from "../../shared/design-system/ui/Tooltip";
 import { ShimmerText } from "../../shared/design-system/ui/ShimmerText";
@@ -127,7 +130,7 @@ function ComposerModelsFor({
   const [open, setOpen] = useState(false);
   const [retry, setRetry] = useState(0);
   const unavailableDescriptionId = useId();
-  const mentioned = useMentionModels(pubkeys, retry);
+  const mentioned = useMentionModels(pubkeys, retry, place);
   const choices = useMemo<readonly MentionModelChoice[]>(
     () =>
       mentioned.flatMap((choice) => {
@@ -588,6 +591,21 @@ function AgentChoice({
       ...(effort ? { effort } : {}),
     });
   };
+  // A hosted runtime with many providers groups its models by provider.
+  const groups = [
+    ...new Set(choice.models.flatMap((item) => item.group ?? [])),
+  ];
+  const radios = (items: typeof choice.models, group?: string) => (
+    <MenuRadioGroup value={runs.id} onValueChange={chooseModel}>
+      {items.map((item) => (
+        <MenuRadioItem key={item.id} value={item.id} closeOnClick>
+          {group && item.label.startsWith(`${group} · `)
+            ? item.label.slice(group.length + 3)
+            : item.label}
+        </MenuRadioItem>
+      ))}
+    </MenuRadioGroup>
+  );
   const model = (level?: string) =>
     several ? (
       <div className={styles.model}>
@@ -608,13 +626,37 @@ function AgentChoice({
             }
           />
           <MenuPopup size="compact" side="top" align="end">
-            <MenuRadioGroup value={runs.id} onValueChange={chooseModel}>
-              {choice.models.map((item) => (
-                <MenuRadioItem key={item.id} value={item.id} closeOnClick>
-                  {item.label}
-                </MenuRadioItem>
-              ))}
-            </MenuRadioGroup>
+            {groups.length ? (
+              <>
+                {choice.models.some((item) => !item.group) &&
+                  radios(choice.models.filter((item) => !item.group))}
+                {groups.map((group) => (
+                  <MenuSubmenu key={group}>
+                    <MenuSubmenuTrigger
+                      data-selected={
+                        choice.models.find((item) => item.id === runs.id)
+                          ?.group === group
+                          ? ""
+                          : undefined
+                      }
+                    >
+                      {group}
+                    </MenuSubmenuTrigger>
+                    <MenuSubmenuPopup
+                      size="compact"
+                      aria-label={`${group} models`}
+                    >
+                      {radios(
+                        choice.models.filter((item) => item.group === group),
+                        group,
+                      )}
+                    </MenuSubmenuPopup>
+                  </MenuSubmenu>
+                ))}
+              </>
+            ) : (
+              radios(choice.models)
+            )}
           </MenuPopup>
         </MenuRoot>
       </div>

@@ -939,6 +939,9 @@ export type Model = Readonly<{
   efforts: readonly Effort[];
   /** The effort a run on it uses without a pick, when known. */
   effort?: string;
+  /** Pickers list models with the same group in a submenu named by it, as a
+   * hosted runtime with many providers names each model "<group> · <model>". */
+  group?: string;
 }>;
 /** The models an owner can pick from, and the id of the one used without a pick. */
 export type Models = Readonly<{
@@ -1126,7 +1129,7 @@ export type AgentType<Config = unknown> = {
   /** Models and effort levels the owner can pick for the next run while
    * mentioning the agent. Discovery may be async but must not start a turn.
    * The picks reach that run as `Delivery.model` and `Delivery.effort`. */
-  models?(agent: Agent<Config>): Models | Promise<Models>;
+  models?(agent: Agent<Config>, place?: SessionPlace): Models | Promise<Models>;
   /** Offers immediate controls for the agent's session scope: under `channel`
    * a channel's top-level message joins the channel's one session, and under
    * `thread` it starts a thread of its own, with no session to act on. A DM or
@@ -1213,8 +1216,11 @@ export type AgentType<Config = unknown> = {
     harness: string;
     mode?: "forwarding" | "attribution";
   }>;
-  /** Makes the type hosted: its provider runs each agent, so it has no `run`,
-   * `models` or `timeoutMs`, and its agents have no attention. */
+  /** Makes the type hosted: its provider runs each agent, so it has no `run`
+   * or `timeoutMs`, and its agents have no attention. A hosted type may offer
+   * `models`, whose picks reach its provider as the message's model and
+   * effort tags, and `sessionControls`, which act through its provider
+   * rather than this app's runners. */
   remote?: RemoteAgentType;
 };
 /** A hosted type's provider: it holds each agent's key and runs it. The app
@@ -3393,14 +3399,13 @@ export class AgentsService extends Service implements Agents {
     if (
       remote &&
       (type.run ||
-        type.models ||
         type.timeoutMs !== undefined ||
         (["provision", "activate", "profile", "remove"] as const).some(
           (step) => typeof remote[step] !== "function",
         ))
     )
       throw new Error(
-        "A hosted agent type has provision, activate, profile and remove, and no run, models or timeoutMs",
+        "A hosted agent type has provision, activate, profile and remove, and no run or timeoutMs",
       );
     const voice = (type as unknown as AgentType).voice;
     const models = type.models;
@@ -3408,9 +3413,13 @@ export class AgentsService extends Service implements Agents {
     this.contributions.register(this.ctx, {
       ...type,
       ...(models && {
-        models: async (agent: Agent<Config>) => {
+        models: async (agent: Agent<Config>, place?: SessionPlace) => {
           await this.checkExecution(agent.key, agent.type);
-          return models(agent);
+          const kind = this.types().find((item) => item.key === agent.type);
+          return models(
+            agent,
+            place && kind ? this.sessionPlace(agent, kind, place) : place,
+          );
         },
       }),
       ...(voice
@@ -5794,6 +5803,16 @@ export class AgentsService extends Service implements Agents {
     };
   }
   sessionState(key: AgentKey, place: SessionPlace): SessionState {
+    // A hosted agent's provider runs its sessions: no runner here holds them.
+    const shown = this.state.agents.find((item) => item.key === key);
+    const kind = shown && this.types().find((item) => item.key === shown.type);
+    if (shown && kind?.remote)
+      return (
+        kind.sessionControls?.state(
+          shown,
+          this.sessionPlace(shown, kind, place),
+        ) ?? "unavailable"
+      );
     const agent = this.agent(key);
     const type = agent && this.types().find((kind) => kind.key === agent.type);
     if (
@@ -5827,6 +5846,14 @@ export class AgentsService extends Service implements Agents {
       throw new Error(
         "Use session controls in the Buzz app that runs this agent.",
       );
+    if (type.remote) {
+      await type.sessionControls.run(
+        agent,
+        this.sessionPlace(agent, type, place),
+        action,
+      );
+      return;
+    }
     await this.runners.control(key, async () => {
       const current = shown();
       if (current?.type !== agent.type || !this.types().includes(type))

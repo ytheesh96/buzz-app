@@ -14116,6 +14116,59 @@ it("has a hosted agent's provider stop its turn in one conversation", async () =
   ).resolves.toBe(true);
 });
 
+it("lets a hosted type offer models and run session controls through its provider", async () => {
+  const { service, plugin } = await setup();
+  const { type, remote } = cloud();
+  const models = vi.fn(async () => ({
+    current: "fast",
+    models: [
+      { id: "fast", label: "Fast", efforts: [] },
+      {
+        id: "big",
+        label: "Provider · Big",
+        group: "Provider",
+        efforts: [{ id: "high", label: "High" }],
+      },
+    ],
+  }));
+  let state: "idle" | "active" | "compacting" = "idle";
+  const run = vi.fn(async () => {});
+  const sessionControls = {
+    scope: () => "thread" as const,
+    state: vi.fn(() => state),
+    run,
+    subscribe: () => () => {},
+  };
+  plugin.agents.register({ ...type, models, sessionControls, remote });
+  await service.create({ type: "example/cloud", name: "Sky" });
+  const hosted = service.types().find((item) => item.key === "example/cloud");
+  const agent = service.snapshot().agents.find((a) => a.key === hostedKey);
+  const place = { channelId: "channel-1", root: "m1" };
+  await expect(hosted?.models?.(agent as never, place)).resolves.toMatchObject({
+    current: "fast",
+  });
+  expect(models).toHaveBeenCalledWith(agent, place);
+  // No runner on this device holds it: its provider answers.
+  expect(service.sessionState(hostedKey, place)).toBe("idle");
+  state = "compacting";
+  expect(service.sessionState(hostedKey, place)).toBe("compacting");
+  state = "idle";
+  await service.session(hostedKey, place, "compact");
+  expect(run).toHaveBeenCalledWith(
+    expect.objectContaining({ key: hostedKey }),
+    expect.objectContaining({ channelId: "channel-1" }),
+    "compact",
+  );
+});
+
+it("still refuses a hosted type that runs its own turns", async () => {
+  const { plugin } = await setup();
+  const { type } = cloud();
+  expect(() =>
+    plugin.agents.register({ ...type, run: async () => {} }),
+  ).toThrow("no run or timeoutMs");
+});
+
 it("reads and replaces a hosted agent's instructions through its provider", async () => {
   const { service, plugin } = await setup();
   const { type, remote } = cloud();
