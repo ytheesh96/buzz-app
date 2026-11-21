@@ -20,6 +20,16 @@ import { forgetMemoryListingsOnSelection } from "../../features/agents/memory";
 import inlineStyles from "../../shared/InlineReference.module.css";
 import { createActivityTab } from "../builderlab/adapter-type/Activity";
 import { gatewayRoutes } from "../../features/agents/gateway/route";
+import { AgentInstructions } from "../../features/agents/AgentInstructions";
+import { AgentSaveButton } from "../../features/agents/AgentSaveButton";
+import { ModelPicker } from "../../features/agents/ModelPicker";
+import { Button } from "../../shared/design-system/ui/Button";
+import { Field } from "../../shared/design-system/ui/Field";
+import { Input } from "../../shared/design-system/ui/Input";
+import { PreferenceRow } from "../../shared/design-system/ui/PreferenceRow";
+import { Select } from "../../shared/design-system/ui/Select";
+import { SettingsGroup } from "../../shared/design-system/ui/SettingsGroup";
+import { Textarea } from "../../shared/design-system/ui/Textarea";
 
 export const inject = [
   "pages",
@@ -43,6 +53,26 @@ export const apply: PluginModule["apply"] = (ctx) => {
   // hosted agents get, for any hosted type's own Activity tab. Plugins read it
   // with ctx.reflect.get("publishedActivity")?.component and give it their
   // tab's props.
+  // Local patch: Buzz's own controls for an outside agent type's settings tab
+  // and creation fields, as Buzz's built-in harnesses compose them (Harness,
+  // Model and Thinking rows in a SettingsGroup, AgentInstructions, the shared
+  // save bar), read with ctx.reflect.get("agentUi"). Props as in buzz-app.
+  ctx.provide(
+    "agentUi",
+    Object.freeze({
+      version: 1,
+      SettingsGroup,
+      PreferenceRow,
+      Select,
+      Field,
+      Input,
+      Textarea,
+      Button,
+      ModelPicker,
+      AgentInstructions,
+      AgentSaveButton,
+    }),
+  );
   ctx.provide("publishedActivity", {
     component: createActivityTab(
       relay,
