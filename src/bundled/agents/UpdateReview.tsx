@@ -21,7 +21,14 @@ export function UpdateReview({ agents }: { agents: Agents }) {
   const types = useSyncExternalStore(agents.subscribe, agents.types);
   // Agents in every connected community, so a target outside the selected
   // one, or one whose community is offline for now, doesn't block the rest.
-  const { running } = useSyncExternalStore(agents.subscribe, agents.snapshot);
+  const { running, agents: shown } = useSyncExternalStore(
+    agents.subscribe,
+    agents.snapshot,
+  );
+  // Local patch: a hosted agent's proposed change is reviewed too; it is
+  // listed, never running here.
+  const hosted = (pubkey: string) =>
+    shown?.find((a) => a.pubkey === pubkey && a.place === "hosted");
   // The one shown stays until saved or closed, even if its agent goes offline
   // or an earlier request's comes back, so the owner's edits aren't lost.
   const [held, hold] = useState<Readonly<{ id: string; agent: Agent }>>();
@@ -35,7 +42,7 @@ export function UpdateReview({ agents }: { agents: Agents }) {
       } catch {
         return false;
       }
-    });
+    }) ?? hosted(request.agent);
   const [request, agent] =
     kept && held
       ? [kept, kept.settings ? held.agent : (target(kept) ?? held.agent)]
@@ -85,7 +92,11 @@ export function UpdateReview({ agents }: { agents: Agents }) {
     <AgentCreateDialog
       key={request.id}
       agents={agents}
-      types={types.filter((type) => !type.remote)}
+      types={
+        agent.place === "hosted"
+          ? types.filter((type) => type.key === agent.type)
+          : types.filter((type) => !type.remote)
+      }
       community={request.community}
       update={{
         agent,

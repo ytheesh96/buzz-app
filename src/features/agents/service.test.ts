@@ -13579,10 +13579,10 @@ it("opens owner review for a CLI draft from the owner's own hosted agent (local 
         },
       });
   };
-  // Not the owner's agent, no name, or not a creation: dropped.
+  // Not the owner's agent, no name, or an unknown action: dropped.
   draft(other, { displayName: "Nope", systemPrompt: "x" });
   draft(hostedKey, { systemPrompt: "x" });
-  draft(hostedKey, { agentName: "Sky", displayName: "Nope" }, "update");
+  draft(hostedKey, { agentName: "Sky", displayName: "Nope" }, "delete");
   expect(service.creationRequests()).toEqual([]);
   draft(hostedKey, { displayName: " Otter ", systemPrompt: "Scout jobs." });
   draft(hostedKey, { displayName: "Otter", systemPrompt: "Scout jobs." });
@@ -13613,6 +13613,125 @@ it("opens owner review for a CLI draft from the owner's own hosted agent (local 
   connect(false);
   expect(release).toHaveBeenCalled();
   expect(listeners.size).toBe(0);
+});
+
+it("reviews a CLI draft-update to the owner's hosted agent and saves it through its provider (local patch)", async () => {
+  const { service, plugin, session, connect } = await setup({
+    listed: [
+      record(hostedKey, {
+        content: JSON.stringify({ name: "Sky" }),
+        tags: [
+          ["d", hostedKey],
+          ["runtime", "example/cloud"],
+        ],
+      }),
+    ],
+  });
+  const { type, remote } = cloud();
+  let held = "Old instructions.";
+  const instructions = {
+    get: vi.fn(async () => held),
+    set: vi.fn(async ({ instructions }: { instructions: string }) => {
+      held = instructions;
+    }),
+  };
+  plugin.agents.register({
+    ...type,
+    carry: (config: { instructions?: string }) => ({
+      instructions: config.instructions,
+    }),
+    adopt: (carry: { instructions?: string }) => ({
+      instructions: carry.instructions,
+    }),
+    remote: { ...remote, instructions },
+  } as unknown as typeof type);
+  type Listener = (agent: string, request: Record<string, unknown>) => void;
+  const listeners = new Set<Listener>();
+  Object.assign(session, {
+    agentActivity: {
+      managementRequests: (listener: Listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      activate: () => () => {},
+    },
+  });
+  connect(false);
+  connect(true);
+  await vi.waitFor(() => expect(listeners.size).toBe(1));
+  await vi.waitFor(() =>
+    expect(service.find(hostedKey)).toMatchObject({ place: "hosted" }),
+  );
+  let n = 0;
+  const update = (from: string, request: Record<string, unknown>) => {
+    for (const listener of listeners)
+      listener(from, {
+        kind: "agent_management_request",
+        channelId: channel,
+        payload: {
+          type: "agent_management_request",
+          action: "update",
+          requestId: `34aeaccc-c83b-4422-beac-a4b8661f9f${(n++).toString().padStart(2, "0")}`,
+          request: { channelId: channel, ...request },
+        },
+      });
+  };
+  // Another's agent, an unknown target, or no change: dropped.
+  update(other, { agentName: "Sky", systemPrompt: "x" });
+  update(hostedKey, { agentName: "Nobody", systemPrompt: "x" });
+  update(hostedKey, { agentName: "Sky", displayName: "Sky" });
+  expect(service.updateRequests()).toEqual([]);
+  update(hostedKey, {
+    agentName: "Sky",
+    displayName: "Sky Two",
+    systemPrompt: "New instructions.",
+    model: "ignored",
+  });
+  const [request] = service.updateRequests();
+  expect(request).toMatchObject({
+    requester: hostedKey,
+    agent: hostedKey,
+    agentName: "Sky",
+    agentType: "example/cloud",
+    name: "Sky Two",
+    instructions: "New instructions.",
+  });
+  if (!request) throw new Error("fixture");
+  await expect(
+    service.approveUpdate(request.id, {
+      type: "example/echo",
+      name: "Sky Two",
+    }),
+  ).rejects.toThrow("A hosted agent's type can't change here");
+  // The owner edited the proposed instructions before saving.
+  await service.approveUpdate(request.id, {
+    type: "example/cloud",
+    name: "Sky Two",
+    config: { instructions: "Reviewed instructions." },
+  });
+  expect(instructions.set).toHaveBeenCalledWith(
+    expect.objectContaining({
+      pubkey: hostedKey,
+      instructions: "Reviewed instructions.",
+    }),
+  );
+  expect(remote.profile).toHaveBeenCalledWith(
+    expect.objectContaining({ pubkey: hostedKey, name: "Sky Two" }),
+  );
+  expect(service.updateRequests()).toEqual([]);
+  // A rename alone leaves the instructions as they are, whatever the form held.
+  instructions.set.mockClear();
+  update(hostedKey, { agentName: "Sky Two", displayName: "Sky Three" });
+  const [rename] = service.updateRequests();
+  if (!rename) throw new Error("fixture");
+  expect(rename.instructions).toBeUndefined();
+  await service.approveUpdate(rename.id, {
+    type: "example/cloud",
+    name: "Sky Three",
+    config: { instructions: "" },
+  });
+  expect(instructions.set).not.toHaveBeenCalled();
+  expect(held).toBe("Reviewed instructions.");
 });
 
 it("retains hosted creation settings across restart and retries without provisioning another agent", async () => {

@@ -906,6 +906,10 @@ export function AgentCreateDialog({
           ) : Create ? (
             <Create
               key={type.key}
+              // Local patch: an edit's agent and proposal, for hosted types.
+              {...(update
+                ? { agent: update.agent, proposal: update.request }
+                : {})}
               config={config}
               disabled={pending}
               onChange={(next) => {

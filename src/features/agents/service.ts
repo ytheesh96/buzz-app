@@ -407,6 +407,9 @@ export type AgentViewProps<Config = unknown> = {
 export type AgentCreateProps<Config = unknown> = {
   /** Existing agent when editing saved config or rendering a library card. */
   agent?: Agent<Config>;
+  /** Local patch: the reviewed change when the owner reviews an agent's
+   * proposed edit, so a hosted type shows what it will and won't change. */
+  proposal?: AgentUpdateRequest;
   openSettings?: () => void;
   /** Model fields may use the compact card treatment in the library. */
   modelAppearance?: "glass-ghost" | "inverted";
@@ -4656,7 +4659,9 @@ export class AgentsService extends Service implements Agents {
         originOf(member.relay) === request.community &&
         !member.deleted,
     );
-    if (!identity || identity.deleting)
+    // Local patch: a hosted agent's change saves through its provider.
+    if (!identity) return this.approveHostedUpdate(request, input);
+    if (identity.deleting)
       throw new Error(`${request.agentName} no longer exists`);
     const binding = this.bindingOf(identity);
     if (!binding || binding.controller.signal.aborted)
@@ -4771,6 +4776,51 @@ export class AgentsService extends Service implements Agents {
       );
     } finally {
       this.approving.delete(id);
+    }
+  }
+  /** Local patch: saves an owner-reviewed change to a hosted agent, as its
+   * own tabs would: a new name through its provider's profile, and new
+   * instructions through its provider, only when the request proposed them.
+   * Its type and other settings don't change this way. */
+  private async approveHostedUpdate(
+    request: AgentUpdateRequest,
+    { type, name, config }: NewAgent,
+  ) {
+    const agent = this.state.agents.find(
+      (entry) =>
+        entry.pubkey === request.agent &&
+        entry.place === "hosted" &&
+        originOf(entry.relay) === request.community,
+    );
+    if (!agent || agent.deleting)
+      throw new Error(`${request.agentName} no longer exists`);
+    if (type !== agent.type)
+      throw new Error("A hosted agent's type can't change here");
+    const kind = this.types().find((entry) => entry.key === agent.type);
+    const instructions =
+      request.instructions === undefined
+        ? undefined
+        : config !== undefined && kind?.carry
+          ? (kind.carry(config).instructions ?? "")
+          : request.instructions;
+    const hosted =
+      instructions === undefined
+        ? undefined
+        : this.hostedInstructions(agent.pubkey);
+    if (instructions !== undefined && !hosted)
+      throw new Error(`${agent.name}'s instructions can't be changed here`);
+    this.approving.add(request.id);
+    try {
+      if (hosted && instructions !== undefined) {
+        const current = await hosted.get();
+        if (current !== instructions) await hosted.set(instructions, current);
+      }
+      if (name.trim() && name.trim() !== agent.name)
+        await this.save(agent.pubkey, { name });
+      this.updates = this.updates.filter((item) => item.id !== request.id);
+      this.notify();
+    } finally {
+      this.approving.delete(request.id);
     }
   }
   teamUpdateRequests = () => this.teamUpdates;
@@ -8442,9 +8492,10 @@ export class AgentsService extends Service implements Agents {
     };
   }
 
-  /** Local patch: a `buzz agents draft-create` request from one of the
-   * viewer's own agents in this community, wherever it runs, opens the same
-   * review as a local agent's agent_create. Anything else is dropped. */
+  /** Local patch: a `buzz agents draft-create` or `draft-update` request
+   * from one of the viewer's own agents in this community, wherever it runs,
+   * hosted ones included, opens the same review as a local agent's
+   * agent_create or agent_update. Anything else is dropped. */
   private remoteDraft(
     origin: string,
     from: string,
@@ -8456,15 +8507,18 @@ export class AgentsService extends Service implements Agents {
         : undefined;
     const payload = field(envelope, "payload");
     const draft = field(payload, "request");
+    const action = field(payload, "action");
     const name = field(draft, "displayName");
     const instructions = field(draft, "systemPrompt");
     const requestId = field(payload, "requestId");
     if (
       field(payload, "type") !== "agent_management_request" ||
-      field(payload, "action") !== "create" ||
-      typeof name !== "string" ||
-      !name.trim() ||
-      name.trim().length > 120 ||
+      (action !== "create" && action !== "update") ||
+      (name !== undefined &&
+        (typeof name !== "string" ||
+          !name.trim() ||
+          name.trim().length > 120)) ||
+      (action === "create" && name === undefined) ||
       (instructions !== undefined && typeof instructions !== "string") ||
       (typeof instructions === "string" && instructions.length > 20_000)
     )
@@ -8472,40 +8526,72 @@ export class AgentsService extends Service implements Agents {
     const viewer = this.communities.snapshot().viewer;
     const binding = this.bound.get(origin)?.binding;
     if (!viewer || binding?.viewer !== viewer) return;
+    const owned = (agent: Agent) =>
+      agent.owner === viewer &&
+      originOf(agent.relay) === origin &&
+      !agent.deleting &&
+      !agent.unfinished;
     const requester = this.state.agents.find(
-      (agent) =>
-        agent.pubkey === from &&
-        agent.owner === viewer &&
-        originOf(agent.relay) === origin &&
-        !agent.deleting &&
-        !agent.unfinished,
+      (agent) => agent.pubkey === from && owned(agent),
     );
-    // Its own type, so a hosted agent proposes one hosted the same way.
-    if (!requester || !this.types().some((t) => t.key === requester.type))
-      return;
+    if (!requester) return;
     const id =
       typeof requestId === "string" && /^[0-9a-f-]{36}$/i.test(requestId)
         ? requestId
         : crypto.randomUUID();
     if (
       this.requests.some((request) => request.id === id) ||
+      this.updates.some((request) => request.id === id) ||
       this.pendingRequests() >= 16
     )
       return;
-    this.requests = [
-      ...this.requests,
-      {
-        id,
-        requester: from,
-        requesterName: requester.name,
-        owner: viewer,
-        community: origin,
-        type: requester.type,
-        name: name.trim(),
-        ...(typeof instructions === "string" &&
-          instructions.trim() && { instructions }),
-      },
-    ];
+    const base = {
+      id,
+      requester: from,
+      requesterName: requester.name,
+      owner: viewer,
+      community: origin,
+    };
+    if (action === "create") {
+      // Its own type, so a hosted agent proposes one hosted the same way.
+      if (!this.types().some((t) => t.key === requester.type)) return;
+      this.requests = [
+        ...this.requests,
+        {
+          ...base,
+          type: requester.type,
+          name: (name as string).trim(),
+          ...(typeof instructions === "string" &&
+            instructions.trim() && { instructions }),
+        },
+      ];
+    } else {
+      // The agent named exactly, itself included; runtime, provider, model
+      // and respond-to have no counterpart in Buzz's review and are ignored.
+      const agentName = field(draft, "agentName");
+      if (typeof agentName !== "string") return;
+      const targets = this.state.agents.filter(
+        (agent) => agent.name === agentName.trim() && owned(agent),
+      );
+      const [target] = targets;
+      if (!target || targets.length > 1) return;
+      const renamed =
+        typeof name === "string" && name.trim() !== target.name
+          ? name.trim()
+          : undefined;
+      if (renamed === undefined && instructions === undefined) return;
+      this.updates = [
+        ...this.updates,
+        {
+          ...base,
+          agent: target.pubkey,
+          agentName: target.name,
+          agentType: target.type,
+          ...(renamed !== undefined && { name: renamed }),
+          ...(typeof instructions === "string" && { instructions }),
+        },
+      ];
+    }
     this.notify();
   }
 
