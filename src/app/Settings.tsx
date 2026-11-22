@@ -54,6 +54,7 @@ import {
 } from "../shared/design-system/icons/index";
 import { canRetryPlugin, type PluginManager } from "../plugins/manager";
 import type { Catalog, PluginInfo } from "../plugins/types";
+import { externalPluginIcon } from "../plugins/content-icon";
 import type { Communities, Membership } from "../features/communities/service";
 import { PluginImport } from "./PluginImport";
 import { PluginUpdateFailure } from "./PluginUpdates";
@@ -207,10 +208,29 @@ function PluginIcon({
   plugin: PluginInfo;
   size?: number;
 }) {
+  // The catalog is re-read often; key the icon on the installed revision, not the object.
+  const { id } = plugin.manifest;
+  const { revision } = plugin;
+  const packagedIcon =
+    plugin.source === "external" &&
+    Boolean(plugin.iconPngRevision || plugin.iconJpgRevision);
+  const [externalUrl, setExternalUrl] = useState<string>();
+  useEffect(() => {
+    let current = true;
+    const icon = packagedIcon ? externalPluginIcon(id, revision) : undefined;
+    if (!icon) setExternalUrl(undefined);
+    else
+      void icon.then((url) => {
+        if (current) setExternalUrl(url);
+      });
+    return () => {
+      current = false;
+    };
+  }, [id, revision, packagedIcon]);
   const url =
     plugin.source === "bundled"
       ? bundledIcons.get(plugin.manifest.id)
-      : undefined;
+      : externalUrl;
   const [failedUrl, setFailedUrl] = useState<string>();
   return (
     <span
