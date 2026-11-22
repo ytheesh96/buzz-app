@@ -1,0 +1,270 @@
+# Builds patched Buzz desktop as signed, self-updating Linux AppImages for
+# x86_64 (omarchy) and aarch64 (m1, Asahi), following block/buzz-app's Linux
+# recipe (Ubuntu 24.04, hermit, fix-appimage.sh, then sign the repaired bytes).
+#
+# Version: <upstream version>+<build>, e.g. 1.0.6+3. Semver orders build
+# metadata numerically, so patch-only rebuilds are updates too.
+#
+# From `patched` (push or manual dispatch with arch=all) it publishes a GitHub
+# Release with both AppImages, their .sig files, and latest.json pointing
+# directly to the GitHub Release asset URLs.
+name: buzz-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Explicit version override, e.g. 1.0.6+3 (default: auto-increment)"
+        required: false
+      arch:
+        description: "Target architecture (all, x86_64, or aarch64)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - x86_64
+          - aarch64
+  push:
+    branches: [patched]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: buzz-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
+          base="${tag#v}"
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            releases="$(gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName')"
+            last="$(printf '%s\n' "$releases" | sed -n "s/^${base//./\\.}+\([0-9]*\)$/\1/p" | sort -n | tail -1)"
+            # Previous buzz-pkg releases reached 1.0.6+2; ensure the first fork
+            # release on 1.0.6 sorts above existing installs.
+            if [ "$base" = "1.0.6" ] && [ "${last:-0}" -lt 2 ]; then
+              last=2
+            fi
+            version="$base+$(( ${last:-0} + 1 ))"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building $tag as $version"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            appimagetool_sha256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+            runtime_sha256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            appimagetool_sha256: f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
+            runtime_sha256: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:24.04
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      BUZZ_UPDATER_PUBLIC_KEY: ${{ vars.BUZZ_UPDATER_PUBLIC_KEY }}
+      BUZZ_UPDATER_ENDPOINT: ${{ vars.BUZZ_UPDATER_ENDPOINT }}
+      CARGO_HOME: /root/.cargo
+      PNPM_STORE_DIR: /root/.local/share/pnpm/store
+    steps:
+      - name: Skip unselected arch
+        if: inputs.arch != '' && inputs.arch != 'all' && inputs.arch != matrix.arch
+        run: echo "Skipping ${{ matrix.arch }} (requested ${{ inputs.arch }})"
+
+      - name: Install build and packaging dependencies
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl desktop-file-utils file git \
+            libasound2-dev libayatana-appindicator3-dev libgtk-3-dev librsvg2-dev \
+            libopus-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config \
+            squashfs-tools wget xdg-utils zstd jq
+
+      - uses: actions/checkout@v4
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+
+      - name: Compute dependency cache keys
+        id: src
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          echo "cargo_hash=$(sha256sum Cargo.lock | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "pnpm_hash=$(sha256sum pnpm-lock.yaml | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        id: pnpm-cache
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+        uses: actions/cache/restore@v4
+        with:
+          path: /root/.local/share/pnpm/store
+          key: pnpm-v1-${{ matrix.arch }}-${{ steps.src.outputs.pnpm_hash }}
+          restore-keys: pnpm-v1-${{ matrix.arch }}-
+
+      - name: Restore Cargo and target cache
+        id: cargo-cache
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /root/.cargo/registry
+            /root/.cargo/git
+            target
+          key: cargo-v1-${{ matrix.arch }}-${{ steps.src.outputs.cargo_hash }}
+          restore-keys: cargo-v1-${{ matrix.arch }}-
+
+      - name: Install pinned AppImage repacking tools
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+        run: |
+          set -euo pipefail
+          wget -q -O /tmp/appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${{ matrix.arch }}.AppImage
+          echo '${{ matrix.appimagetool_sha256 }}  /tmp/appimagetool' | sha256sum -c
+          install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+          wget -q -O /tmp/appimage-runtime https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${{ matrix.arch }}
+          echo '${{ matrix.runtime_sha256 }}  /tmp/appimage-runtime' | sha256sum -c
+          install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
+          echo 'APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime' >> "$GITHUB_ENV"
+
+      - name: Build AppImage
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+        run: |
+          set -euo pipefail
+          test -n "$BUZZ_UPDATER_PUBLIC_KEY" && test -n "$BUZZ_UPDATER_ENDPOINT"
+          export PATH="$PWD/bin:$PATH"
+          pnpm install --frozen-lockfile --store-dir "$PNPM_STORE_DIR"
+          config="$(jq -n --arg v "$VERSION" --arg k "$BUZZ_UPDATER_PUBLIC_KEY" --arg e "$BUZZ_UPDATER_ENDPOINT" \
+            '{version: $v, bundle: {createUpdaterArtifacts: false}, plugins: {updater: {pubkey: $k, endpoints: [$e]}}}')"
+          pnpm tauri build --ci --no-sign --bundles appimage --config "$config" -- --locked
+
+      - name: Repair, verify and sign the AppImage
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/bin:$PATH"
+          shopt -s nullglob
+          images=(target/release/bundle/appimage/*.AppImage)
+          test "${#images[@]}" -eq 1
+          bash scripts/fix-appimage.sh "${images[0]}"
+          image="$(realpath "${images[0]}")"
+          mkdir "$RUNNER_TEMP/x" && (cd "$RUNNER_TEMP/x" && "$image" --appimage-extract >/dev/null)
+          shim="$RUNNER_TEMP/x/squashfs-root/usr/bin/Buzz"
+          bin="$RUNNER_TEMP/x/squashfs-root/usr/bin/Buzz.bin"
+          test -x "$shim" && test -x "$bin"
+          grep -qF 'WEBKIT_A11Y_BUS_ADDRESS=unix:path=/nonexistent' "$shim" || {
+            echo '::error::AppImage launcher shim lacks WEBKIT_A11Y_BUS_ADDRESS workaround'; exit 1;
+          }
+          grep -aqF __TAURI_BUNDLE_TYPE_VAR_APP "$bin" || { echo '::error::AppImage app lacks its bundle type'; exit 1; }
+          for value in "$BUZZ_UPDATER_PUBLIC_KEY" "$BUZZ_UPDATER_ENDPOINT"; do
+            grep -aqF "$value" "$bin" || { echo '::error::app does not embed the updater configuration'; exit 1; }
+          done
+          mkdir -p "$RUNNER_TEMP/dist"
+          out="$RUNNER_TEMP/dist/Buzz_${{ matrix.arch }}.AppImage"
+          cp "$image" "$out"
+          pnpm tauri signer sign "$out"
+          test -s "$out.sig" || { echo '::error::Updater signing failed'; exit 1; }
+
+      - name: Prune bulky intermediate outputs before saving Cargo cache
+        if: (inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch) && steps.cargo-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf \
+            target/release/bundle \
+            target/release/incremental \
+            target/buzz-cli-build
+
+      - name: Save pnpm store cache
+        if: (inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch) && steps.pnpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /root/.local/share/pnpm/store
+          key: pnpm-v1-${{ matrix.arch }}-${{ steps.src.outputs.pnpm_hash }}
+
+      - name: Save Cargo and target cache
+        if: (inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch) && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /root/.cargo/registry
+            /root/.cargo/git
+            target
+          key: cargo-v1-${{ matrix.arch }}-${{ steps.src.outputs.cargo_hash }}
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == matrix.arch
+        with:
+          name: buzz-${{ matrix.arch }}
+          path: ${{ runner.temp }}/dist/
+          compression-level: 0
+          retention-days: 1
+
+  release:
+    needs: [version, build]
+    if: github.ref == 'refs/heads/patched' && (inputs.arch == '' || inputs.arch == 'all')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write latest.json, publish release, and verify URLs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          tag_url="${VERSION//+/%2B}"
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag_url}"
+          jq -n --arg v "$VERSION" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg n "Patched Buzz (${{ needs.version.outputs.tag }}) at ${GITHUB_SHA::7}" \
+            --arg base "$base_url" \
+            --rawfile x Buzz_x86_64.AppImage.sig --rawfile a Buzz_aarch64.AppImage.sig '{
+              version: $v, notes: $n, pub_date: $d,
+              platforms: {
+                "linux-x86_64-appimage": {signature: $x, url: "\($base)/Buzz_x86_64.AppImage"},
+                "linux-aarch64-appimage": {signature: $a, url: "\($base)/Buzz_aarch64.AppImage"}
+              }}' > latest.json
+          gh release create "$VERSION" ./* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "Buzz $VERSION" \
+            --notes "Patched Buzz desktop AppImages (x86_64, aarch64), based on ${{ needs.version.outputs.tag }} at ${GITHUB_SHA::7}."
+          # Verify public updater manifest and asset URLs resolve cleanly.
+          manifest_url="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/latest.json"
+          curl -fsSL --retry 5 --retry-delay 3 "$manifest_url" | jq -e --arg v "$VERSION" '.version == $v' >/dev/null
+          for k in linux-x86_64-appimage linux-aarch64-appimage; do
+            u="$(jq -r --arg k "$k" '.platforms[$k].url' latest.json)"
+            curl -fsIL --retry 5 --retry-delay 3 -o /dev/null "$u"
+          done
