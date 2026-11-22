@@ -709,6 +709,15 @@ async fn plugin_module(
 ) -> Result<String, String> {
     with_manager(manager, move |m| m.module(&id, &revision)).await
 }
+/// Inert package files (README, icon) for an installed plugin's current revision.
+#[tauri::command]
+async fn plugin_content(
+    manager: tauri::State<'_, PluginManager>,
+    id: String,
+    revision: String,
+) -> Result<buzzodz_plugins::PluginContent, String> {
+    with_manager(manager, move |m| m.content(&id, &revision)).await
+}
 #[tauri::command]
 async fn plugin_recover(
     manager: tauri::State<'_, PluginManager>,
@@ -840,6 +849,7 @@ fn commands<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Sen
         plugin_change,
         plugin_reload,
         plugin_module,
+        plugin_content,
         plugin_recover,
         plugin_host_run_command,
         plugin_host_call_context,
