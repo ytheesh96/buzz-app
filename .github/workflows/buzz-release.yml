@@ -30,6 +30,7 @@ on:
     paths-ignore:
       - "README.md"
       - "docs/**"
+      - ".github/workflows/buzz-pr-check.yml"
 
 permissions:
   contents: write

@@ -1,0 +1,88 @@
+# Lightweight fork PR check for ytheesh96/buzz-app (`patched` branch).
+# Runs formatting, types, design checks, frontend build, Vitest unit tests, and
+# Rust formatting/tests without upstream's 29-shard Playwright matrix or
+# cargo-deny advisories on upstream Cargo.lock.
+name: buzz-pr-check
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [patched]
+  push:
+    branches: [patched]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buzz-pr-check-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  js-check:
+    name: JavaScript check & build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Lint, types, and design checks
+        run: ./bin/pnpm check
+      - name: Frontend build
+        run: ./bin/pnpm exec vite build
+
+  vitest:
+    name: Vitest (${{ matrix.shard }}/8)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Vitest shard
+        env:
+          BUZZ_TEST_WORKERS: "2"
+        run: ./bin/pnpm exec vitest run --shard=${{ matrix.shard }}/8
+
+  rust:
+    name: Rust fmt & tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Tauri system libraries
+        run: |
+          sudo sed -i '\|^http://azure\.archive\.ubuntu\.com/ubuntu/|d' /etc/apt/apt-mirrors.txt
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y dbus-daemon libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+      - name: Install isolated pinned Rust toolchain
+        run: |
+          export RUSTUP_HOME="$RUNNER_TEMP/buzz-rustup"
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          ./bin/rustup toolchain install
+          ./bin/rustup default "$(./bin/rustup show active-toolchain | cut -d ' ' -f1)"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: buzz-pr-rust
+          save-if: ${{ github.ref == 'refs/heads/patched' }}
+      - name: Rust formatting
+        run: ./bin/cargo fmt --all --check
+      - name: Rust workspace tests
+        run: ./bin/cargo test --workspace --locked

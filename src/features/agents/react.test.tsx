@@ -141,9 +141,16 @@ it("passes conversation place to type.models and refreshes when place changes", 
   const types = [
     {
       key: "type",
-      models: async (_agent: Agent, place?: { channelId: string; root?: string }) => {
+      models: async (
+        _agent: Agent,
+        place?: { channelId: string; root?: string },
+      ) => {
         seen.push(place);
-        return models(place?.root ? `thread-${place.root}` : `ch-${place?.channelId ?? "none"}`);
+        return models(
+          place?.root
+            ? `thread-${place.root}`
+            : `ch-${place?.channelId ?? "none"}`,
+        );
       },
     },
   ];
@@ -157,7 +164,12 @@ it("passes conversation place to type.models and refreshes when place changes", 
   );
   const { result, rerender } = renderHook(
     ({ place }) => useMentionModels(["agent"], 0, place),
-    { initialProps: { place: { channelId: "c1" } as { channelId: string; root?: string } }, wrapper },
+    {
+      initialProps: {
+        place: { channelId: "c1" } as { channelId: string; root?: string },
+      },
+      wrapper,
+    },
   );
   await waitFor(() => expect(result.current[0]?.current).toBe("ch-c1"));
   // Fresh object with same channelId/root must not re-fetch.

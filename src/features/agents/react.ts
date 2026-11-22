@@ -194,7 +194,8 @@ export function useMentionModels(
                 let found: Models = { current: "", models: [] };
                 let failed = false;
                 try {
-                  if (type.models) found = await type.models(agent, resolvedPlace);
+                  if (type.models)
+                    found = await type.models(agent, resolvedPlace);
                 } catch (error) {
                   failed = true;
                   console.warn(
