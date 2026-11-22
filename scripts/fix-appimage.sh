@@ -150,6 +150,12 @@ for var in GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_SYSTEM_PATH \
     unset "$var"
   fi
 done
+# Work around WebKitGTK AT-SPI ActiveDescendantChanged null-pointer crash when
+# session accessibility is enabled (e.g. Superwhisper sets NO_AT_BRIDGE=0).
+# Preserve any explicit caller override; remove once WebKitGTK fixes the crash.
+if [[ -z "${WEBKIT_A11Y_BUS_ADDRESS+x}" ]]; then
+  export WEBKIT_A11Y_BUS_ADDRESS=unix:path=/nonexistent
+fi
 exec -a "Buzz" "$here/Buzz.bin" "$@"
 SHIM
 chmod +x "$APP_BIN"
