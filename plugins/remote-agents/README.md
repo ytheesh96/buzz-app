@@ -1,6 +1,6 @@
 # Remote Agents (Buzz Plugin)
 
-Connect Buzz to a self-hosted `buzz-host` server so your AI agents run 24/7 in isolated Docker sandboxes — even when your laptop is asleep.
+Connect Buzz to a self-hosted `buzz-host` server so your AI agents stay online 24/7 — even when your laptop is asleep.
 
 ## Install in Buzz
 
@@ -12,4 +12,4 @@ Connect Buzz to a self-hosted `buzz-host` server so your AI agents run 24/7 in i
 4. Open **Settings → Plugins → Remote Agents**, paste your invite link (`wss://...#token=bhg_...`) into the **Server** box, and click **Save and check**.
 5. Create your first agent in **Agents → New agent → Harness → Remote → Self-hosted**.
 
-> This folder is synced from `buzz-host` via `tools/sync-public-plugin.sh`. Do not edit `plugin.js` directly here.
+> This folder is synced from `buzz-host` via `tools/sync-public-plugin.sh` with private host defaults scrubbed. Do not edit `plugin.js` directly here.
