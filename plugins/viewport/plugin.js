@@ -8032,14 +8032,20 @@ function createDesktop({ React, client, ctx, uiKit, Btn, Icon, navigation, panel
 			}
 		}, h("header", {
 			"data-buzz-ui": "",
-			className: "panel-header"
+			className: "panel-header",
+			style: {
+				flexWrap: "nowrap",
+				gap: "var(--space-2)"
+			}
 		}, h("div", {
 			className: "panel-header-title",
 			style: {
 				display: "flex",
 				alignItems: "center",
 				gap: "var(--space-2)",
-				minWidth: 0
+				minWidth: 0,
+				flex: "1 1 0",
+				overflow: "hidden"
 			}
 		}, h(Btn, {
 			size: "sm",
@@ -8047,7 +8053,8 @@ function createDesktop({ React, client, ctx, uiKit, Btn, Icon, navigation, panel
 			onClick: () => setSidebarOpen((v) => !v),
 			title: sidebarOpen ? "Hide agent list" : "Show agent list",
 			"aria-label": sidebarOpen ? "Hide agent list" : "Show agent list",
-			"aria-pressed": sidebarOpen
+			"aria-pressed": sidebarOpen,
+			style: { flexShrink: 0 }
 		}, Icon ? h(Icon, {
 			name: "sidebar",
 			size: 16
@@ -8086,6 +8093,7 @@ function createDesktop({ React, client, ctx, uiKit, Btn, Icon, navigation, panel
 				padding: "2px 8px",
 				borderRadius: 999,
 				whiteSpace: "nowrap",
+				flexShrink: 0,
 				fontWeight: 500,
 				background: view.mine ? "var(--accent-subtle, rgba(34,197,94,.16))" : "var(--surface-inset, rgba(128,128,128,.14))",
 				color: view.mine ? "var(--text-primary)" : "var(--text-secondary)"
@@ -8095,7 +8103,9 @@ function createDesktop({ React, client, ctx, uiKit, Btn, Icon, navigation, panel
 			style: {
 				display: "flex",
 				alignItems: "center",
-				gap: "var(--space-2)"
+				gap: "var(--space-1)",
+				flexWrap: "nowrap",
+				flexShrink: 0
 			}
 		}, view.status === "live" && (view.mine ? h(Btn, {
 			size: "sm",
@@ -8121,14 +8131,16 @@ function createDesktop({ React, client, ctx, uiKit, Btn, Icon, navigation, panel
 			size: "sm",
 			variant: "ghost",
 			disabled: working,
+			title: "Stop desktop",
 			onClick: () => void handleStopDesktop()
-		}, actionBusy === "stop" ? "Stopping…" : "Stop desktop"), canInspect && h(Btn, {
+		}, actionBusy === "stop" ? "Stopping…" : "Stop"), canInspect && h(Btn, {
 			size: "sm",
 			variant: showInspector ? "outline" : "ghost",
 			onClick: () => setInspectorOpen((v) => !v),
 			title: showInspector ? `Hide ${activeName} sidebar` : `Show ${activeName} sidebar`,
 			"aria-label": showInspector ? `Hide ${activeName} sidebar` : `Show ${activeName} sidebar`,
-			"aria-pressed": showInspector
+			"aria-pressed": showInspector,
+			style: { flexShrink: 0 }
 		}, Icon ? h(Icon, {
 			name: "sidebarRight",
 			size: 16
