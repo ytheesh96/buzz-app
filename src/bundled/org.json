@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "manifest": {
+      "id": "local.buzz-host",
+      "name": "Remote Agents",
+      "apiVersion": 1,
+      "description": "Remote agents hosted on a self-hosted buzz-host server. They keep answering while this computer is off.",
+      "discovery": { "category": "agents", "tags": ["self-hosted", "remote"] }
+    },
+    "enabledByDefault": true
+  },
+  {
+    "manifest": {
+      "id": "local.buzz-host.viewport",
+      "name": "Viewport",
+      "apiVersion": 1,
+      "description": "In-app Viewport page, live remote desktop preview, and takeover controls for self-hosted agents.",
+      "discovery": { "category": "agents", "tags": ["self-hosted", "remote"] }
+    },
+    "enabledByDefault": true
+  }
+]

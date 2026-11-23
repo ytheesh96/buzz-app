@@ -59,7 +59,7 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
     );
     assert.notEqual(services.accountActions.snapshot()[0], firstFeedback);
     await settle();
-    assert.equal(services.pages.snapshot().length, 4);
+    assert.equal(services.pages.snapshot().length, 5);
     const { bundledPlugins } = await vite.ssrLoadModule(
       "/src/bundled/index.ts",
     );
@@ -211,7 +211,13 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
         .map((card) => card.pluginId)
         .sort(),
       // A build without NIP-FI or the development broker has no Builderlab.
-      ["buzz.channels", "buzz.emoji", "buzz.github", "buzz.pairing"],
+      [
+        "buzz.channels",
+        "buzz.emoji",
+        "buzz.github",
+        "buzz.pairing",
+        "local.buzz-host",
+      ],
     );
     // The device-local template library remains reachable without a selected community.
     assert.equal(
@@ -273,7 +279,13 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
         .map((card) => card.pluginId)
         .sort(),
       // A build without NIP-FI or the development broker has no Builderlab.
-      ["buzz.channels", "buzz.emoji", "buzz.github", "buzz.pairing"],
+      [
+        "buzz.channels",
+        "buzz.emoji",
+        "buzz.github",
+        "buzz.pairing",
+        "local.buzz-host",
+      ],
     );
 
     await vi.waitFor(() =>
@@ -349,7 +361,7 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
         .snapshot()
         .some((panel) => panel.pluginId === "buzz.agent-activity"),
     );
-    assert.equal(services.conversation.accessories.snapshot().length, 2);
+    assert.equal(services.conversation.accessories.snapshot().length, 3);
     assert.deepEqual(
       services.conversation.accessories
         .snapshot()
@@ -357,6 +369,7 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
       [
         ["activity", "response"],
         ["typing-presentation", undefined],
+        ["desktop-preview", "response"],
       ],
     );
     assert.equal(
@@ -364,10 +377,10 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
       "buzz.agent-activity",
     );
     await services.plugins.change("disable", "buzz.agent-activity");
-    assert.equal(services.conversation.accessories.snapshot().length, 0);
+    assert.equal(services.conversation.accessories.snapshot().length, 1);
     await services.plugins.change("enable", "buzz.agent-activity");
     await vi.waitFor(() =>
-      assert.equal(services.conversation.accessories.snapshot().length, 2),
+      assert.equal(services.conversation.accessories.snapshot().length, 3),
     );
 
     await services.plugins.change("enable", "buzz.bestie");
@@ -403,7 +416,7 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
       services.pages.snapshot().some((page) => page.pluginId === "buzz.bestie"),
       false,
     );
-    assert.equal(services.pages.snapshot().length, 4);
+    assert.equal(services.pages.snapshot().length, 5);
     await services.plugins.change("enable", "buzz.bestie");
     // Management completion is not activation completion; Cordis still owns import/disposal barriers.
     await vi.waitFor(() =>
@@ -490,7 +503,7 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
     const projects = services.pages
       .snapshot()
       .find((page) => page.pluginId === "buzz.repos");
-    assert.equal(services.pages.snapshot().length, 5);
+    assert.equal(services.pages.snapshot().length, 6);
     assert.equal(projects.pluginId, "buzz.repos");
     assert.equal(projects.id, "repos");
     assert.equal(projects.title, "Repository");
@@ -520,10 +533,16 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
       /Select a community to open a repository/,
     );
     await services.plugins.change("disable", "buzz.repos");
-    // Bestie was re-enabled above, so it registered after Inbox.
+    // Inbox and Bestie were re-enabled above, so they registered after Viewport.
     assert.deepEqual(
       services.pages.snapshot().map((page) => page.pluginId),
-      ["buzz.channels", "buzz.agents", "buzz.inbox", "buzz.bestie"],
+      [
+        "buzz.channels",
+        "buzz.agents",
+        "local.buzz-host.viewport",
+        "buzz.inbox",
+        "buzz.bestie",
+      ],
     );
     await services.plugins.change("enable", "buzz.repos");
     await vi.waitFor(() => {

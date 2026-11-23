@@ -7,12 +7,17 @@
 // no README. See docs/plugin-architecture.md, "Organization plugins".
 import type { PluginManifest, PluginModule } from "../plugins/api";
 import type { BundledPlugin } from "../plugins/manager";
+import * as remoteAgents from "../../plugins/remote-agents/plugin.js";
+import * as viewport from "../../plugins/viewport/plugin.js";
 import listed from "./org.json";
 
 type Listed = Readonly<{ manifest: PluginManifest; enabledByDefault: boolean }>;
 
 /** Each listed plugin's code, by manifest id. */
-const modules: Readonly<Record<string, PluginModule>> = {};
+const modules: Readonly<Record<string, PluginModule>> = {
+  "local.buzz-host": remoteAgents,
+  "local.buzz-host.viewport": viewport,
+};
 
 /** org.json's plugins with their code; one without code is left out. */
 export const orgPlugins: readonly BundledPlugin[] = (
