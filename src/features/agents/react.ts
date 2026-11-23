@@ -130,6 +130,7 @@ export function useMentionModels(
   pubkeys: readonly string[],
   retry = 0,
   place?: SessionPlace,
+  runtimes?: Readonly<Record<string, string | undefined>>,
 ): readonly MentionModelChoice[] {
   const remote = useContext(MentionModelsContext);
   const agents = useContext(AgentsContext);
@@ -148,6 +149,12 @@ export function useMentionModels(
   const channelId = place?.channelId;
   const root = place?.root;
   const placeKey = channelId ? `${channelId}\n${root ?? ""}` : "";
+  const runtimeKey = key
+    ? key
+        .split(":")
+        .map((pubkey) => `${pubkey}=${runtimes?.[pubkey] ?? ""}`)
+        .join("\n")
+    : "";
   const [resolved, setResolved] = useState<{
     remote: typeof remote;
     snapshot: typeof snapshot;
@@ -155,6 +162,7 @@ export function useMentionModels(
     key: string;
     retry: number;
     placeKey: string;
+    runtimeKey: string;
     choices: readonly MentionModelChoice[];
   }>();
   useEffect(() => {
@@ -162,6 +170,14 @@ export function useMentionModels(
     const resolvedPlace: SessionPlace | undefined = channelId
       ? { channelId, ...(root ? { root } : {}) }
       : undefined;
+    const requested = new Map(
+      runtimeKey
+        ? runtimeKey.split("\n").map((entry) => {
+            const idx = entry.indexOf("=");
+            return [entry.slice(0, idx), entry.slice(idx + 1) || undefined];
+          })
+        : [],
+    );
     void (
       remote
         ? remote(key ? key.split(":") : []).catch(() => [])
@@ -194,8 +210,17 @@ export function useMentionModels(
                 let found: Models = { current: "", models: [] };
                 let failed = false;
                 try {
-                  if (type.models)
-                    found = await type.models(agent, resolvedPlace);
+                  if (type.models) {
+                    const requestedRuntime = requested.get(pubkey);
+                    found =
+                      requestedRuntime !== undefined
+                        ? await type.models(
+                            agent,
+                            resolvedPlace,
+                            requestedRuntime,
+                          )
+                        : await type.models(agent, resolvedPlace);
+                  }
                 } catch (error) {
                   failed = true;
                   console.warn(
@@ -218,13 +243,34 @@ export function useMentionModels(
           ).then((choices) => choices.flat())
     ).then((choices) => {
       if (current)
-        setResolved({ remote, snapshot, types, key, retry, placeKey, choices });
+        setResolved({
+          remote,
+          snapshot,
+          types,
+          key,
+          retry,
+          placeKey,
+          runtimeKey,
+          choices,
+        });
     });
     return () => {
       current = false;
     };
-  }, [snapshot, types, key, remote, retry, channelId, root, placeKey]);
-  // Never offer a previous agent/config's choices while the new lookup settles.
+  }, [
+    snapshot,
+    types,
+    key,
+    remote,
+    retry,
+    channelId,
+    root,
+    placeKey,
+    runtimeKey,
+  ]);
+  // Never offer a previous agent/config's choices while the new lookup settles,
+  // except when only a draft runtime preview changed (keep the card open while
+  // the newly selected runtime's models load).
   return resolved?.remote === remote &&
     resolved?.snapshot === snapshot &&
     resolved?.types === types &&

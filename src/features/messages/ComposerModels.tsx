@@ -9,6 +9,7 @@ import {
 import { selectProfiles } from "../relay/profile-selection";
 import type { ProfileQueries } from "../relay/profile-directory";
 import {
+  Fragment,
   useContext,
   useEffect,
   useId,
@@ -42,7 +43,10 @@ import {
 import { IconButton } from "../../shared/design-system/ui/IconButton";
 import { Button } from "../../shared/design-system/ui/Button";
 import {
+  MenuGroup,
+  MenuGroupLabel,
   MenuRoot,
+  MenuSeparator,
   MenuTrigger,
   MenuPopup,
   MenuRadioGroup,
@@ -130,7 +134,16 @@ function ComposerModelsFor({
   const [open, setOpen] = useState(false);
   const [retry, setRetry] = useState(0);
   const unavailableDescriptionId = useId();
-  const mentioned = useMentionModels(pubkeys, retry, place);
+  const requestedRuntimes = useMemo(
+    () =>
+      Object.fromEntries(
+        pubkeys.flatMap((pubkey) =>
+          value[pubkey]?.runtime ? [[pubkey, value[pubkey].runtime]] : [],
+        ),
+      ),
+    [pubkeys, value],
+  );
+  const mentioned = useMentionModels(pubkeys, retry, place, requestedRuntimes);
   const choices = useMemo<readonly MentionModelChoice[]>(
     () =>
       mentioned.flatMap((choice) => {
@@ -145,6 +158,7 @@ function ComposerModelsFor({
         );
         return visible.loading ||
           visible.failed ||
+          (visible.runtimes?.length ?? 0) > 1 ||
           visible.models.length > 1 ||
           visible.models.some((model) => model.efforts.length) ||
           visible.session ||
@@ -180,7 +194,7 @@ function ComposerModelsFor({
         (item) => item.pubkey === pubkey,
       );
       return (
-        (value[pubkey]?.model || value[pubkey]?.effort) &&
+        hasPick(value[pubkey]) &&
         agent &&
         !agents?.types().some((type) => type.key === agent.type)
       );
@@ -192,7 +206,7 @@ function ComposerModelsFor({
         agentSnapshot?.status === "error") &&
       pubkeys.some(
         (pubkey) =>
-          (value[pubkey]?.model || value[pubkey]?.effort) &&
+          hasPick(value[pubkey]) &&
           !agentSnapshot.agents.some((agent) => agent.pubkey === pubkey),
       ));
   const inventoryFailed =
@@ -219,11 +233,17 @@ function ComposerModelsFor({
     const waitingForSavedChoices =
       resettable &&
       (unresolvedInventory ||
-        mentioned.some(
-          (choice) =>
-            (choice.loading || choice.failed) &&
-            (value[choice.pubkey]?.model || value[choice.pubkey]?.effort),
-        ));
+        mentioned.some((choice) => {
+          const saved = value[choice.pubkey];
+          if (!hasPick(saved)) return false;
+          if (choice.loading || choice.failed) return true;
+          return Boolean(
+            saved?.runtime &&
+              choice.runtimes?.some((item) => item.id === saved.runtime) &&
+              choice.modelsRuntime &&
+              choice.modelsRuntime !== saved.runtime,
+          );
+        }));
     if (waitingForSavedChoices) {
       onResolved(
         null,
@@ -236,36 +256,77 @@ function ComposerModelsFor({
     const resolved: Record<string, RunPick> = resettable
       ? {}
       : Object.fromEntries(
-          Object.entries(value).map(([pubkey, { model, effort }]) => [
+          Object.entries(value).map(([pubkey, { runtime, model, effort }]) => [
             pubkey,
-            { ...(model ? { model } : {}), ...(effort ? { effort } : {}) },
+            {
+              ...(runtime ? { runtime } : {}),
+              ...(model ? { model } : {}),
+              ...(effort ? { effort } : {}),
+            },
           ]),
         );
     for (const choice of resettable ? mentioned : choices) {
       if (choice.loading || choice.failed) continue;
       const saved = value[choice.pubkey] ?? {};
-      const selected = choice.models.find((item) => item.id === saved.model);
-      const runs = runModel(choice, saved.model);
-      if (!runs?.id) continue;
-      const explicitEffort = runs.efforts.find(
-        (item) =>
-          item.id === saved.effort &&
-          (!resettable || !saved.model || selected !== undefined),
-      )?.id;
+      const selectedRuntime = saved.runtime
+        ? choice.runtimes?.find((item) => item.id === saved.runtime)
+        : undefined;
+      const modelsReady =
+        !saved.runtime ||
+        !choice.modelsRuntime ||
+        choice.modelsRuntime === saved.runtime;
+      const selected = modelsReady
+        ? choice.models.find((item) => item.id === saved.model)
+        : undefined;
+      const runs = runModel(choice, modelsReady ? saved.model : undefined);
+      const explicitEffort =
+        modelsReady && runs.id
+          ? runs.efforts.find(
+              (item) =>
+                item.id === saved.effort &&
+                (!resettable || !saved.model || selected !== undefined),
+            )?.id
+          : undefined;
       const effort =
         explicitEffort ??
         (runs.efforts.some((item) => item.id === runs.effort)
           ? runs.effort
           : undefined);
-      if (choice.sendDefaults && !explicitOnly) {
+      if (choice.sendDefaults && !explicitOnly && runs.id) {
+        const runtimeOut =
+          selectedRuntime?.id ??
+          (choice.runtimes?.length && choice.currentRuntime
+            ? choice.currentRuntime
+            : undefined);
         resolved[choice.pubkey] = {
+          ...(runtimeOut ? { runtime: runtimeOut } : {}),
           model: runs.id,
           ...(effort ? { effort } : {}),
         };
-      } else if (resettable && (selected || explicitEffort)) {
+      } else if (
+        resettable &&
+        (selectedRuntime || selected || explicitEffort)
+      ) {
+        const runtimeOut =
+          selectedRuntime?.id ??
+          (selected && choice.runtimes?.length && choice.currentRuntime
+            ? choice.currentRuntime
+            : undefined);
         resolved[choice.pubkey] = {
+          ...(runtimeOut ? { runtime: runtimeOut } : {}),
           ...(selected ? { model: selected.id } : {}),
           ...(explicitEffort ? { effort: explicitEffort } : {}),
+        };
+      } else if (
+        !resettable &&
+        choice.runtimes?.length &&
+        choice.currentRuntime &&
+        resolved[choice.pubkey]?.model &&
+        !resolved[choice.pubkey]?.runtime
+      ) {
+        resolved[choice.pubkey] = {
+          runtime: choice.currentRuntime,
+          ...resolved[choice.pubkey],
         };
       }
     }
@@ -282,8 +343,10 @@ function ComposerModelsFor({
     inventoryFailed,
   ]);
   const canReset =
-    resettable &&
-    pubkeys.some((pubkey) => value[pubkey]?.model || value[pubkey]?.effort);
+    resettable && pubkeys.some((pubkey) => hasPick(value[pubkey]));
+  const anyRuntimes = choices.some(
+    (choice) => (choice.runtimes?.length ?? 0) > 1,
+  );
   useLayoutEffect(() => {
     if (!restoreComposerFocusAfterReset.current || open) return;
     restoreComposerFocusAfterReset.current = false;
@@ -292,22 +355,34 @@ function ComposerModelsFor({
   if (!choices.length && !inventoryFailed && !canReset) return null;
   const picked = choices.flatMap((choice) => {
     if (choice.loading) return [];
-    const { model, effort } = value[choice.pubkey] ?? {};
-    const runs = runModel(choice, model);
-    const selected = choice.models.some((item) => item.id === model);
+    const { runtime, model, effort } = value[choice.pubkey] ?? {};
+    const runtimeItem = choice.runtimes?.find((item) => item.id === runtime);
+    const showRuntime = Boolean(
+      runtimeItem && (resettable || runtime !== choice.currentRuntime),
+    );
+    const modelsMatch =
+      !runtime || !choice.modelsRuntime || choice.modelsRuntime === runtime;
+    const runs = runModel(choice, modelsMatch ? model : undefined);
+    const selected =
+      modelsMatch && choice.models.some((item) => item.id === model);
     const unavailable = unavailableSavedPick(
       choice,
       value[choice.pubkey] ?? {},
       resettable,
       explicitOnly,
     );
-    const savedEffortApplies = !resettable || !model || selected;
+    const savedEffortApplies =
+      modelsMatch && (!resettable || !model || selected);
     const supportedEffort = savedEffortApplies
       ? runs.efforts.find((item) => item.id === effort)
       : undefined;
     const text =
       unavailable ??
-      [selected && runs.label, effort !== undefined && supportedEffort?.label]
+      [
+        showRuntime && runtimeItem?.label,
+        selected && runs.label,
+        effort !== undefined && supportedEffort?.label,
+      ]
         .filter(Boolean)
         .join(" · ");
     return text ? [choices.length > 1 ? `${choice.name}: ${text}` : text] : [];
@@ -327,7 +402,7 @@ function ComposerModelsFor({
     const { [pubkey]: _, ...rest } = value;
     const type = agents?.find(pubkey)?.type;
     onChange(
-      next.model || next.effort
+      next.runtime || next.model || next.effort
         ? { ...rest, [pubkey]: { ...next, ...(type ? { type } : {}) } }
         : rest,
     );
@@ -440,7 +515,9 @@ function ComposerModelsFor({
                   setOpen(false);
                 }}
               >
-                Reset model and effort
+                {anyRuntimes
+                  ? "Reset runtime, model, and effort"
+                  : "Reset model and effort"}
               </Button>
             )}
             {choices.map((choice, index) => (
@@ -473,6 +550,9 @@ function ComposerModelsFor({
   );
 }
 
+const hasPick = (saved: RunPick | undefined) =>
+  Boolean(saved?.runtime || saved?.model || saved?.effort);
+
 /** The model a run uses: the picked one, or else the agent's own. */
 const runModel = (choice: MentionModelChoice, picked: string | undefined) =>
   choice.models.find((item) => item.id === picked) ??
@@ -486,6 +566,20 @@ function unavailableSavedPick(
   explicitOnly: boolean,
 ) {
   if (!resettable || choice.loading || choice.failed) return undefined;
+  if (
+    value.runtime &&
+    choice.runtimes?.length &&
+    !choice.runtimes.some((item) => item.id === value.runtime)
+  ) {
+    return "Saved runtime is unavailable. Using the active runtime. Your saved choice is retained until you reset it.";
+  }
+  if (
+    value.runtime &&
+    choice.modelsRuntime &&
+    choice.modelsRuntime !== value.runtime
+  ) {
+    return undefined;
+  }
   const selectedModel = choice.models.some((item) => item.id === value.model);
   const runs = runModel(choice, value.model);
   const unavailableModel = Boolean(value.model && !selectedModel);
@@ -570,15 +664,41 @@ function AgentChoice({
         </div>
       </div>
     );
-  const runs = runModel(choice, value.model);
-  const selectedModel = choice.models.some((item) => item.id === value.model)
-    ? value.model
+  const runtimes = choice.runtimes ?? [];
+  const hasRuntimes = runtimes.length > 1;
+  const selectedRuntime = runtimes.some((item) => item.id === value.runtime)
+    ? value.runtime
     : undefined;
+  const activeRuntimeId =
+    selectedRuntime ?? choice.currentRuntime ?? runtimes[0]?.id ?? "";
+  const activeRuntime =
+    runtimes.find((item) => item.id === activeRuntimeId) ?? runtimes[0];
+  const runtimeGroups = [
+    ...new Set(runtimes.flatMap((item) => item.group ?? [])),
+  ];
+  const runtimeModelsLoading = Boolean(
+    activeRuntimeId &&
+      choice.modelsRuntime &&
+      choice.modelsRuntime !== activeRuntimeId,
+  );
+  const runs = runModel(choice, runtimeModelsLoading ? undefined : value.model);
+  const selectedModel =
+    !runtimeModelsLoading &&
+    choice.models.some((item) => item.id === value.model)
+      ? value.model
+      : undefined;
   const selectedEffort =
-    !chatScoped || !value.model || selectedModel !== undefined
+    !runtimeModelsLoading &&
+    (!chatScoped || !value.model || selectedModel !== undefined)
       ? runs.efforts.find((item) => item.id === value.effort)?.id
       : undefined;
   const several = choice.models.length > 1;
+  // Switching runtime/profile resets model and effort so the new runtime's own
+  // default applies unless a model on it is chosen next.
+  const chooseRuntime = (id: string) => {
+    if (id === activeRuntimeId && (!chatScoped || value.runtime === id)) return;
+    pick(chatScoped || id !== choice.currentRuntime ? { runtime: id } : {});
+  };
   // Chat choices stay explicit even when they match the provider default.
   // An effort the new model lacks falls back to its default.
   const chooseModel = (id: string) => {
@@ -587,6 +707,7 @@ function AgentChoice({
       ? value.effort
       : undefined;
     pick({
+      ...(selectedRuntime ? { runtime: selectedRuntime } : {}),
       ...(chatScoped || id !== choice.current ? { model: id } : {}),
       ...(effort ? { effort } : {}),
     });
@@ -673,7 +794,73 @@ function AgentChoice({
     >
       <PanelHeader
         variant="card"
-        title={<PanelHeaderLabel title={choice.name} />}
+        title={
+          <PanelHeaderLabel title={choice.name}>
+            {!choice.automatic && hasRuntimes && (
+              <div className={styles.runtime}>
+                <MenuRoot>
+                  <MenuTrigger
+                    disabled={disabled}
+                    aria-label={
+                      chatScoped
+                        ? `Runtime for ${choice.name} in this chat`
+                        : `Runtime for ${choice.name}'s next run`
+                    }
+                    render={
+                      <Button variant="subtle" size="sm">
+                        <span className={styles.about}>
+                          {activeRuntime?.label ?? activeRuntimeId}
+                        </span>
+                        <CaretDownIcon size={12} aria-hidden="true" />
+                      </Button>
+                    }
+                  />
+                  <MenuPopup size="compact" side="top" align="start">
+                    <MenuRadioGroup
+                      value={activeRuntimeId}
+                      onValueChange={chooseRuntime}
+                    >
+                      {runtimes
+                        .filter((item) => !item.group)
+                        .map((item) => (
+                          <MenuRadioItem
+                            key={item.id}
+                            value={item.id}
+                            closeOnClick
+                          >
+                            {item.label}
+                          </MenuRadioItem>
+                        ))}
+                      {runtimeGroups.map((group) => (
+                        <Fragment key={group}>
+                          {runtimes.some((item) => !item.group) && (
+                            <MenuSeparator />
+                          )}
+                          <MenuGroup>
+                            <MenuGroupLabel>{group}</MenuGroupLabel>
+                            {runtimes
+                              .filter((item) => item.group === group)
+                              .map((item) => (
+                                <MenuRadioItem
+                                  key={item.id}
+                                  value={item.id}
+                                  closeOnClick
+                                >
+                                  {item.label.startsWith(`${group} · `)
+                                    ? item.label.slice(group.length + 3)
+                                    : item.label}
+                                </MenuRadioItem>
+                              ))}
+                          </MenuGroup>
+                        </Fragment>
+                      ))}
+                    </MenuRadioGroup>
+                  </MenuPopup>
+                </MenuRoot>
+              </div>
+            )}
+          </PanelHeaderLabel>
+        }
         actions={
           choice.session && (
             <SessionActions
@@ -703,6 +890,19 @@ function AgentChoice({
                 Retry
               </Button>
             </div>
+          ) : runtimeModelsLoading ? (
+            <div className={styles.status} role="status" aria-busy="true">
+              <span className={styles.statusIcon}>
+                <CircleNotchIcon
+                  size={20}
+                  className="motion-safe:animate-spin"
+                  aria-hidden="true"
+                />
+              </span>
+              <div className={styles.statusCopy}>
+                <ShimmerText>Loading models…</ShimmerText>
+              </div>
+            </div>
           ) : runs.efforts.length > 0 ? (
             <EffortSlider
               name={choice.name}
@@ -715,6 +915,7 @@ function AgentChoice({
               disabled={disabled}
               pick={(effort) =>
                 pick({
+                  ...(selectedRuntime ? { runtime: selectedRuntime } : {}),
                   ...(selectedModel ? { model: selectedModel } : {}),
                   ...(effort ? { effort } : {}),
                 })
