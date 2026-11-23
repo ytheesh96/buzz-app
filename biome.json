@@ -15,6 +15,7 @@
       "!!dist-author",
       "!!dist-plugins",
       "!!plugins/remote-agents",
+      "!!plugins/viewport",
       "!!dist-buzz-mcp",
       "!!.profiles",
       "!!src-tauri/target",
