@@ -45,3 +45,12 @@
 .buzz-tabs[data-variant="navigation"] .buzz-tabs-list::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Panel tab strips signal horizontal overflow with edge fades; hide their native
+   scrollbar so classic-scrollbar platforms do not paint a bar over the underline. */
+.buzz-tabs[data-variant="panel"] .buzz-tabs-list {
+  scrollbar-width: none;
+}
+.buzz-tabs[data-variant="panel"] .buzz-tabs-list::-webkit-scrollbar {
+  display: none;
+}
