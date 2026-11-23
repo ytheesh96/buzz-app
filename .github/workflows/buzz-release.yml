@@ -1,23 +1,27 @@
-# Builds patched Buzz desktop as signed, self-updating Linux AppImages for
-# x86_64 (omarchy) and aarch64 (m1, Asahi), following block/buzz-app's Linux
-# recipe (Ubuntu 24.04, hermit, fix-appimage.sh, then sign the repaired bytes).
+# Builds patched Buzz desktop as signed, self-updating builds for:
+# - Linux x86_64 (omarchy) and aarch64 (m1, Asahi) AppImages, following
+#   block/buzz-app's Linux recipe (Ubuntu 24.04, hermit, fix-appimage.sh, then
+#   sign the repaired bytes).
+# - macOS Apple Silicon (aarch64) ad-hoc signed .app.tar.gz updater tarball and
+#   .dmg (without a Developer ID, friends install via curl|tar to skip
+#   Gatekeeper quarantine; Tauri updater signatures use the same signing key).
 #
-# Version: <upstream version>+<build>, e.g. 1.0.6+3. Semver orders build
+# Version: <upstream version>+<build>, e.g. 1.0.6+7. Semver orders build
 # metadata numerically, so patch-only rebuilds are updates too.
 #
 # From `patched` (push or manual dispatch with arch=all) it publishes a GitHub
-# Release with both AppImages, their .sig files, and latest.json pointing
-# directly to the GitHub Release asset URLs.
+# Release with all platform artifacts, their .sig files, and a single
+# latest.json pointing directly to the GitHub Release asset URLs.
 name: buzz-release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Explicit version override, e.g. 1.0.6+3 (default: auto-increment)"
+        description: "Explicit version override, e.g. 1.0.6+7 (default: auto-increment)"
         required: false
       arch:
-        description: "Target architecture (all, x86_64, or aarch64)"
+        description: "Target build (all, x86_64, aarch64, or macos-aarch64)"
         required: false
         default: "all"
         type: choice
@@ -25,6 +29,7 @@ on:
           - all
           - x86_64
           - aarch64
+          - macos-aarch64
   push:
     branches: [patched]
     paths-ignore:
@@ -232,8 +237,150 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+  build-macos:
+    needs: version
+    if: inputs.arch == '' || inputs.arch == 'all' || inputs.arch == 'macos-aarch64'
+    runs-on: macos-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: aarch64-apple-darwin
+      ARCH: aarch64
+      LIPO: arm64
+      BUZZ_UPDATER_PUBLIC_KEY: ${{ vars.BUZZ_UPDATER_PUBLIC_KEY }}
+      BUZZ_UPDATER_ENDPOINT: ${{ vars.BUZZ_UPDATER_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute dependency cache keys
+        id: src
+        run: |
+          set -euo pipefail
+          echo "cargo_hash=$(shasum -a 256 Cargo.lock | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "pnpm_hash=$(shasum -a 256 pnpm-lock.yaml | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        id: pnpm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/Library/Caches/pnpm
+          key: pnpm-v1-macos-aarch64-${{ steps.src.outputs.pnpm_hash }}
+          restore-keys: pnpm-v1-macos-aarch64-
+
+      - name: Restore Cargo and target cache
+        id: cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v1-macos-aarch64-${{ steps.src.outputs.cargo_hash }}
+          restore-keys: cargo-v1-macos-aarch64-
+
+      - name: Build macOS app bundle
+        run: |
+          set -euo pipefail
+          test -n "$BUZZ_UPDATER_PUBLIC_KEY" && test -n "$BUZZ_UPDATER_ENDPOINT"
+          export PATH="$PWD/bin:$PATH"
+          pnpm install --frozen-lockfile --store-dir "$HOME/Library/Caches/pnpm"
+          rustup target add "$TARGET"
+          config="$(jq -n --arg v "$VERSION" --arg k "$BUZZ_UPDATER_PUBLIC_KEY" --arg e "$BUZZ_UPDATER_ENDPOINT" \
+            '{version: $v, bundle: {createUpdaterArtifacts: false, macOS: {signingIdentity: "-"}}, plugins: {updater: {pubkey: $k, endpoints: [$e]}}}')"
+          pnpm tauri build --ci --bundles app --target "$TARGET" --config "$config" -- --locked
+
+      - name: Sign every bundled executable ad-hoc and verify
+        run: |
+          set -euo pipefail
+          app="target/$TARGET/release/bundle/macos/Buzz.app"
+          test -d "$app"
+          # Sign nested executables first; the bundle signature seals them.
+          find "$app/Contents" -type f -perm -111 -print0 |
+            while IFS= read -r -d '' file; do
+              codesign --force --sign - --options runtime "$file"
+            done
+          codesign --force --sign - --options runtime \
+            --entitlements src-tauri/entitlements.plist "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | tee "$RUNNER_TEMP/codesign.txt"
+          grep -q 'Signature=adhoc' "$RUNNER_TEMP/codesign.txt"
+          test "$(lipo -archs "$app/Contents/MacOS/Buzz")" = "$LIPO"
+          for value in "$BUZZ_UPDATER_PUBLIC_KEY" "$BUZZ_UPDATER_ENDPOINT"; do
+            grep -aqF "$value" "$app/Contents/MacOS/Buzz" || { echo '::error::macOS app does not embed the updater configuration'; exit 1; }
+          done
+          test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$app/Contents/Info.plist")"
+          codesign --display --entitlements :- "$app" > "$RUNNER_TEMP/signed-entitlements.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$RUNNER_TEMP/signed-entitlements.plist")" = true
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' "$RUNNER_TEMP/signed-entitlements.plist")" = true
+
+      - name: Package DMG and signed updater tarball
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/bin:$PATH"
+          app="target/$TARGET/release/bundle/macos/Buzz.app"
+          mkdir -p "$RUNNER_TEMP/dist"
+
+          dmg="$RUNNER_TEMP/dist/Buzz_${ARCH}.dmg"
+          hdiutil create -volname "Buzz" -srcfolder "$app" -ov -format UDZO "$dmg" >/dev/null
+          mnt="$RUNNER_TEMP/mnt"
+          mkdir -p "$mnt"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" >/dev/null
+          trap 'hdiutil detach "$mnt" >/dev/null 2>&1 || true' EXIT
+          test -d "$mnt/Buzz.app"
+          codesign --verify --deep --strict "$mnt/Buzz.app"
+          hdiutil detach "$mnt" >/dev/null
+          trap - EXIT
+
+          staging="$RUNNER_TEMP/updater"
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          ditto "$app" "$staging/Buzz.app"
+          codesign --verify --deep --strict "$staging/Buzz.app"
+          tar="$RUNNER_TEMP/dist/Buzz_${ARCH}.app.tar.gz"
+          (cd "$staging" && COPYFILE_DISABLE=1 tar -czf "$tar" 'Buzz.app')
+          pnpm tauri signer sign "$tar"
+          test -s "$tar" && test -s "$tar.sig" || { echo '::error::macOS updater signing failed'; exit 1; }
+
+      - name: Prune bulky intermediate outputs before saving Cargo cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf \
+            "target/$TARGET/release/bundle" \
+            "target/$TARGET/release/incremental" \
+            target/buzz-cli-build
+
+      - name: Save pnpm store cache
+        if: steps.pnpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/Library/Caches/pnpm
+          key: pnpm-v1-macos-aarch64-${{ steps.src.outputs.pnpm_hash }}
+
+      - name: Save Cargo and target cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v1-macos-aarch64-${{ steps.src.outputs.cargo_hash }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buzz-macos-aarch64
+          path: ${{ runner.temp }}/dist/
+          compression-level: 0
+          retention-days: 1
+
   release:
-    needs: [version, build]
+    needs: [version, build, build-macos]
     if: github.ref == 'refs/heads/patched' && (inputs.arch == '' || inputs.arch == 'all')
     runs-on: ubuntu-latest
     steps:
@@ -253,19 +400,23 @@ jobs:
           jq -n --arg v "$VERSION" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg n "Patched Buzz (${{ needs.version.outputs.tag }}) at ${GITHUB_SHA::7}" \
             --arg base "$base_url" \
-            --rawfile x Buzz_x86_64.AppImage.sig --rawfile a Buzz_aarch64.AppImage.sig '{
+            --rawfile x Buzz_x86_64.AppImage.sig \
+            --rawfile a Buzz_aarch64.AppImage.sig \
+            --rawfile m Buzz_aarch64.app.tar.gz.sig '{
               version: $v, notes: $n, pub_date: $d,
               platforms: {
                 "linux-x86_64-appimage": {signature: $x, url: "\($base)/Buzz_x86_64.AppImage"},
-                "linux-aarch64-appimage": {signature: $a, url: "\($base)/Buzz_aarch64.AppImage"}
+                "linux-aarch64-appimage": {signature: $a, url: "\($base)/Buzz_aarch64.AppImage"},
+                "darwin-aarch64": {signature: $m, url: "\($base)/Buzz_aarch64.app.tar.gz"}
               }}' > latest.json
           gh release create "$VERSION" ./* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
             --title "Buzz $VERSION" \
-            --notes "Patched Buzz desktop AppImages (x86_64, aarch64), based on ${{ needs.version.outputs.tag }} at ${GITHUB_SHA::7}."
+            --notes "Patched Buzz desktop builds (Linux x86_64/aarch64 AppImages, macOS Apple Silicon ad-hoc signed DMG + updater tarball), based on ${{ needs.version.outputs.tag }} at ${GITHUB_SHA::7}."
           # Verify public updater manifest and asset URLs resolve cleanly.
           manifest_url="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/latest.json"
           curl -fsSL --retry 5 --retry-delay 3 "$manifest_url" | jq -e --arg v "$VERSION" '.version == $v' >/dev/null
-          for k in linux-x86_64-appimage linux-aarch64-appimage; do
+          for k in linux-x86_64-appimage linux-aarch64-appimage darwin-aarch64; do
             u="$(jq -r --arg k "$k" '.platforms[$k].url' latest.json)"
             curl -fsIL --retry 5 --retry-delay 3 -o /dev/null "$u"
           done
+          curl -fsIL --retry 5 --retry-delay 3 -o /dev/null "$base_url/Buzz_aarch64.dmg"
