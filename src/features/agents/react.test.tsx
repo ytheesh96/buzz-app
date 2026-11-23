@@ -180,3 +180,81 @@ it("passes conversation place to type.models and refreshes when place changes", 
   await waitFor(() => expect(result.current[0]?.current).toBe("thread-r1"));
   expect(seen).toEqual([{ channelId: "c1" }, { channelId: "c1", root: "r1" }]);
 });
+
+it("passes runtime preview override to type.models and keeps the card mounted while loading", async () => {
+  const pending = deferred<Models>();
+  const seen: Array<string | undefined> = [];
+  const snapshot = {
+    status: "ready",
+    agents: [{ pubkey: "agent", type: "type", name: "Agent" } as Agent],
+  };
+  const types = [
+    {
+      key: "type",
+      models: async (
+        _agent: Agent,
+        _place?: { channelId: string; root?: string },
+        runtime?: string,
+      ) => {
+        seen.push(runtime);
+        if (runtime === "hermes:career-lead") return pending.promise;
+        return {
+          ...models("opus"),
+          currentRuntime: "claude",
+          modelsRuntime: "claude",
+          runtimes: [
+            { id: "claude", label: "Claude Code" },
+            {
+              id: "hermes:career-lead",
+              label: "Hermes · career-lead",
+              group: "Hermes",
+            },
+          ],
+        };
+      },
+    },
+  ];
+  const service = {
+    subscribe: () => () => {},
+    snapshot: () => snapshot,
+    types: () => types,
+  } as unknown as Agents;
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <AgentsContext.Provider value={service}>{children}</AgentsContext.Provider>
+  );
+  const { result, rerender } = renderHook(
+    ({ runtimes }) =>
+      useMentionModels(["agent"], 0, { channelId: "c1" }, runtimes),
+    {
+      initialProps: {
+        runtimes: {} as Record<string, string | undefined>,
+      },
+      wrapper,
+    },
+  );
+  await waitFor(() => expect(result.current[0]?.current).toBe("opus"));
+  rerender({ runtimes: { agent: "hermes:career-lead" } });
+  // Previous choices stay visible (not loading: true) while the new runtime loads.
+  expect(result.current[0]?.loading).toBeUndefined();
+  expect(result.current[0]?.modelsRuntime).toBe("claude");
+  await act(async () => {
+    pending.resolve({
+      ...models("go:flash"),
+      currentRuntime: "claude",
+      modelsRuntime: "hermes:career-lead",
+      runtimes: [
+        { id: "claude", label: "Claude Code" },
+        {
+          id: "hermes:career-lead",
+          label: "Hermes · career-lead",
+          group: "Hermes",
+        },
+      ],
+    });
+  });
+  await waitFor(() =>
+    expect(result.current[0]?.modelsRuntime).toBe("hermes:career-lead"),
+  );
+  expect(result.current[0]?.current).toBe("go:flash");
+  expect(seen).toEqual([undefined, "hermes:career-lead"]);
+});

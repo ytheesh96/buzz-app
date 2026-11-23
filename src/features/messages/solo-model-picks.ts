@@ -29,15 +29,18 @@ export function parseSoloModelPicks(
       )
         return [];
       const record = pick as Record<string, unknown>;
+      const runtime =
+        typeof record.runtime === "string" ? record.runtime : undefined;
       const model = typeof record.model === "string" ? record.model : undefined;
       const effort =
         typeof record.effort === "string" ? record.effort : undefined;
       const type = typeof record.type === "string" ? record.type : undefined;
-      return model || effort
+      return runtime || model || effort
         ? [
             [
               pubkey,
               {
+                ...(runtime ? { runtime } : {}),
                 ...(model ? { model } : {}),
                 ...(effort ? { effort } : {}),
                 ...(type ? { type } : {}),

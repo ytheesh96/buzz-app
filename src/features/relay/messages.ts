@@ -38,12 +38,18 @@ export const REPORT_TYPES = [
   "other",
 ] as const;
 export type ReportType = (typeof REPORT_TYPES)[number];
-/** `["effort", agentPubkey, level]` and `["model", agentPubkey, model]`: what
- * an addressed agent's owner asks of its next run. Only the owner is honoured. */
+/** `["runtime", agentPubkey, runtime]`, `["effort", agentPubkey, level]` and
+ * `["model", agentPubkey, model]`: what an addressed agent's owner asks of its
+ * next run. Only the owner is honoured. */
+export const RUNTIME_TAG = "runtime";
 export const EFFORT_TAG = "effort";
 export const MODEL_TAG = "model";
-export type RunPick = Readonly<{ model?: string; effort?: string }>;
-/** The model and effort picked for each addressed agent, by pubkey. */
+export type RunPick = Readonly<{
+  runtime?: string;
+  model?: string;
+  effort?: string;
+}>;
+/** The runtime, model and effort picked for each addressed agent, by pubkey. */
 export type MentionPicks = Readonly<Record<string, RunPick>>;
 
 /** Domain convenience only. Delivery and read reconciliation remain session-owned. */
@@ -130,14 +136,17 @@ export function createMessages(
     const addressed = entries.length
       ? [...mentions, ...unmentionedRecipients(channelId)]
       : mentions;
-    return entries.flatMap(([key, { model, effort }]) => {
+    return entries.flatMap(([key, { runtime, model, effort }]) => {
       if (
         !addressed.includes(key) ||
-        (model !== undefined && !/^[\w.:/[\]-]{1,64}$/.test(model)) ||
+        (runtime !== undefined &&
+          !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/.test(runtime)) ||
+        (model !== undefined && !/^[\w.:/[\]-]{1,128}$/.test(model)) ||
         (effort !== undefined && !/^[a-z0-9-]{1,32}$/.test(effort))
       )
         throw new Error("A model or effort applies only to an addressed agent");
       return [
+        ...(runtime === undefined ? [] : [[RUNTIME_TAG, key, runtime]]),
         ...(model === undefined ? [] : [[MODEL_TAG, key, model]]),
         ...(effort === undefined ? [] : [[EFFORT_TAG, key, effort]]),
       ];

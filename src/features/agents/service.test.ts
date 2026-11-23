@@ -14148,6 +14148,8 @@ it("lets a hosted type offer models and run session controls through its provide
     current: "fast",
   });
   expect(models).toHaveBeenCalledWith(agent, place);
+  await hosted?.models?.(agent as never, place, "hermes:career-lead");
+  expect(models).toHaveBeenLastCalledWith(agent, place, "hermes:career-lead");
   // No runner on this device holds it: its provider answers.
   expect(service.sessionState(hostedKey, place)).toBe("idle");
   state = "compacting";

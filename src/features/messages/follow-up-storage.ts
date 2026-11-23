@@ -220,6 +220,7 @@ function valid(value: unknown): value is SavedFollowUp {
     Object.values(v.picks).every(
       (pick) =>
         pick &&
+        (pick.runtime === undefined || typeof pick.runtime === "string") &&
         (pick.model === undefined || typeof pick.model === "string") &&
         (pick.effort === undefined || typeof pick.effort === "string"),
     )

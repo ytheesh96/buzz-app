@@ -943,10 +943,22 @@ export type Model = Readonly<{
    * hosted runtime with many providers names each model "<group> · <model>". */
   group?: string;
 }>;
+/** A runtime (or runtime profile) choice for a hosted agent's composer picker. */
+export type RuntimeOption = Readonly<{
+  id: string;
+  label: string;
+  /** Optional section heading for related runtime profiles (e.g. "Hermes"). */
+  group?: string;
+}>;
 /** The models an owner can pick from, and the id of the one used without a pick. */
 export type Models = Readonly<{
   current: string;
   models: readonly Model[];
+  /** Optional runtime/profile choices for hosted agents that switch runtimes per chat. */
+  currentRuntime?: string;
+  /** The runtime whose `models` and `current` are currently loaded. */
+  modelsRuntime?: string;
+  runtimes?: readonly RuntimeOption[];
   /** Send displayed defaults as per-turn picks even when untouched. Opt in only
    * when explicit defaults preserve this provider's running-turn semantics. */
   sendDefaults?: boolean;
@@ -1129,7 +1141,11 @@ export type AgentType<Config = unknown> = {
   /** Models and effort levels the owner can pick for the next run while
    * mentioning the agent. Discovery may be async but must not start a turn.
    * The picks reach that run as `Delivery.model` and `Delivery.effort`. */
-  models?(agent: Agent<Config>, place?: SessionPlace): Models | Promise<Models>;
+  models?(
+    agent: Agent<Config>,
+    place?: SessionPlace,
+    runtime?: string,
+  ): Models | Promise<Models>;
   /** Offers immediate controls for the agent's session scope: under `channel`
    * a channel's top-level message joins the channel's one session, and under
    * `thread` it starts a thread of its own, with no session to act on. A DM or
@@ -3413,13 +3429,18 @@ export class AgentsService extends Service implements Agents {
     this.contributions.register(this.ctx, {
       ...type,
       ...(models && {
-        models: async (agent: Agent<Config>, place?: SessionPlace) => {
+        models: async (
+          agent: Agent<Config>,
+          place?: SessionPlace,
+          runtime?: string,
+        ) => {
           await this.checkExecution(agent.key, agent.type);
           const kind = this.types().find((item) => item.key === agent.type);
-          return models(
-            agent,
-            place && kind ? this.sessionPlace(agent, kind, place) : place,
-          );
+          const resolvedPlace =
+            place && kind ? this.sessionPlace(agent, kind, place) : place;
+          return runtime !== undefined
+            ? models(agent, resolvedPlace, runtime)
+            : models(agent, resolvedPlace);
         },
       }),
       ...(voice
