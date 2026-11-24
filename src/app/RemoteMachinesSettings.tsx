@@ -1,4 +1,12 @@
-import { type ClipboardEvent, useEffect, useId, useRef, useState } from "react";
+import {
+  type ClipboardEvent,
+  type RefObject,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   addRemoteMachine,
   deriveMachineName,
@@ -6,7 +14,6 @@ import {
   parseMachineInput,
   primaryWssUrl,
   probeRemoteMachine,
-  refreshAllRemoteMachines,
   refreshRemoteMachine,
   removeRemoteMachine,
   updateRemoteMachine,
@@ -22,7 +29,6 @@ import {
   PlusIcon,
   TrashIcon,
 } from "../shared/design-system/icons";
-import { AlertDialog } from "../shared/design-system/ui/AlertDialog";
 import { Badge } from "../shared/design-system/ui/Badge";
 import { Button } from "../shared/design-system/ui/Button";
 import { Dialog } from "../shared/design-system/ui/Dialog";
@@ -31,6 +37,10 @@ import { Field } from "../shared/design-system/ui/Field";
 import { InlineHeader } from "../shared/design-system/ui/Header";
 import { IconButton } from "../shared/design-system/ui/IconButton";
 import { Input } from "../shared/design-system/ui/Input";
+import {
+  ProviderDialogActions,
+  ProviderDialogFooter,
+} from "../features/agents/ProviderDialogActions";
 import { PreferenceRow } from "../shared/design-system/ui/PreferenceRow";
 import { SettingsGroup } from "../shared/design-system/ui/SettingsGroup";
 
@@ -48,48 +58,58 @@ function hostLabel(machine: RemoteMachine): string {
   return iroh ? `Iroh ${iroh.nodeId.slice(0, 12)}…` : "";
 }
 
-export function MachineEditorDialog({
+/** The add/edit machine fields and actions. Actions render into the
+ * surrounding dialog's footer through ProviderDialogActions. */
+export function MachineEditorForm({
   machine,
-  onClose,
+  urlInputRef,
+  onCancel,
   onSaved,
+  onPendingChange,
 }: {
   machine?: RemoteMachine | undefined;
-  onClose(): void;
-  onSaved?: ((machine: RemoteMachine) => void) | undefined;
+  urlInputRef: RefObject<HTMLInputElement | null>;
+  onCancel(): void;
+  onSaved(machine: RemoteMachine): void;
+  onPendingChange?: ((pending: boolean) => void) | undefined;
 }) {
   const editing = Boolean(machine);
-  const [open, setOpen] = useState(true);
   const [rawUrl, setRawUrl] = useState(machine ? primaryWssUrl(machine) : "");
   const [name, setName] = useState(machine?.name ?? "");
   const [token, setToken] = useState(machine?.token ?? "");
   const [urlError, setUrlError] = useState<string | undefined>();
   const [submitError, setSubmitError] = useState("");
   const [probeFailed, setProbeFailed] = useState(false);
-  const [pending, setPending] = useState(false);
+  const [pending, setPendingState] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-  const urlInputRef = useRef<HTMLInputElement>(null);
   const formId = useId();
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  const handleUrlChange = (value: string) => {
-    setRawUrl(value);
+  const setPending = (next: boolean) => {
+    setPendingState(next);
+    onPendingChange?.(next);
+  };
+
+  const clearErrors = () => {
     setUrlError(undefined);
     setSubmitError("");
     setProbeFailed(false);
   };
 
+  /** Moves a pairing link's #token= into the masked token field. */
+  const splitPairingLink = (value: string) => {
+    const parsed = parseMachineInput(value);
+    if (parsed.error || !parsed.token) return false;
+    setRawUrl(parsed.url);
+    setToken(parsed.token);
+    clearErrors();
+    return true;
+  };
+
   const handleUrlPaste = (event: ClipboardEvent<HTMLInputElement>) => {
-    const pasted = event.clipboardData.getData("text");
-    const parsed = parseMachineInput(pasted);
-    if (!parsed.error && parsed.token) {
+    if (splitPairingLink(event.clipboardData.getData("text")))
       event.preventDefault();
-      setRawUrl(parsed.url);
-      setToken(parsed.token);
-      setUrlError(undefined);
-      setSubmitError("");
-      setProbeFailed(false);
-    }
   };
 
   const parsedPreview = parseMachineInput(rawUrl);
@@ -104,40 +124,30 @@ export function MachineEditorDialog({
     probe?: Awaited<ReturnType<typeof probeRemoteMachine>>,
   ) => {
     const cleanName = name.trim() || deriveMachineName(cleanUrl);
+    const fields = {
+      name: cleanName,
+      url: cleanUrl,
+      token: cleanToken,
+      ...(probe?.platform ? { platform: probe.platform } : {}),
+      ...(probe?.host ? { host: probe.host } : {}),
+      ...(probe?.role ? { role: probe.role } : {}),
+      ...(probe?.runtimes ? { runtimes: probe.runtimes } : {}),
+      ...(probe?.capabilities ? { capabilities: probe.capabilities } : {}),
+      ...(probe?.publicGuestUrl !== undefined
+        ? { publicGuestUrl: probe.publicGuestUrl }
+        : {}),
+      ...(probe ? { lastSeen: Date.now() } : {}),
+    };
     const saved = machine
-      ? updateRemoteMachine(machine.id, {
-          name: cleanName,
-          url: cleanUrl,
-          token: cleanToken,
-          ...(probe?.platform ? { platform: probe.platform } : {}),
-          ...(probe?.host ? { host: probe.host } : {}),
-          ...(probe?.role ? { role: probe.role } : {}),
-          ...(probe?.runtimes ? { runtimes: probe.runtimes } : {}),
-          ...(probe?.capabilities ? { capabilities: probe.capabilities } : {}),
-          ...(probe?.publicGuestUrl !== undefined
-            ? { publicGuestUrl: probe.publicGuestUrl }
-            : {}),
-          ...(probe ? { lastSeen: Date.now() } : {}),
-        })
-      : addRemoteMachine({
-          name: cleanName,
-          url: cleanUrl,
-          token: cleanToken,
-          ...(probe?.platform ? { platform: probe.platform } : {}),
-          ...(probe?.host ? { host: probe.host } : {}),
-          ...(probe?.role ? { role: probe.role } : {}),
-          ...(probe?.runtimes ? { runtimes: probe.runtimes } : {}),
-          ...(probe?.capabilities ? { capabilities: probe.capabilities } : {}),
-          ...(probe?.publicGuestUrl !== undefined
-            ? { publicGuestUrl: probe.publicGuestUrl }
-            : {}),
-          ...(probe ? { lastSeen: Date.now() } : {}),
-        });
-    if (saved) {
-      onSaved?.(saved);
-      void refreshRemoteMachine(saved.id);
+      ? updateRemoteMachine(machine.id, fields)
+      : addRemoteMachine(fields);
+    setPending(false);
+    if (!saved) {
+      onCancel();
+      return;
     }
-    setOpen(false);
+    void refreshRemoteMachine(saved.id);
+    onSaved(saved);
   };
 
   const save = async ({ skipCheck = false }: { skipCheck?: boolean } = {}) => {
@@ -176,43 +186,7 @@ export function MachineEditorDialog({
   };
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next && !pending) setOpen(false);
-      }}
-      onOpenChangeComplete={(next) => {
-        if (!next) onClose();
-      }}
-      title={editing ? `Edit ${machine?.name}` : "Add machine"}
-      description="Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
-      size="compact"
-      initialFocus={urlInputRef}
-      preventClose={pending}
-      actions={
-        <>
-          <Button disabled={pending} onClick={() => setOpen(false)}>
-            Cancel
-          </Button>
-          {probeFailed && (
-            <Button
-              disabled={pending}
-              onClick={() => void save({ skipCheck: true })}
-            >
-              Save anyway
-            </Button>
-          )}
-          <Button
-            type="submit"
-            form={formId}
-            variant="primary"
-            loading={pending}
-          >
-            {editing ? "Save" : "Connect and save"}
-          </Button>
-        </>
-      }
-    >
+    <>
       <form
         id={formId}
         className="flex flex-col gap-4"
@@ -232,7 +206,11 @@ export function MachineEditorDialog({
             value={rawUrl}
             disabled={pending}
             onPaste={handleUrlPaste}
-            onChange={(event) => handleUrlChange(event.target.value)}
+            onBlur={(event) => splitPairingLink(event.currentTarget.value)}
+            onChange={(event) => {
+              setRawUrl(event.target.value);
+              clearErrors();
+            }}
           />
         </Field>
         <Field
@@ -270,28 +248,115 @@ export function MachineEditorDialog({
           </p>
         )}
       </form>
+      <ProviderDialogActions>
+        <Button disabled={pending} onClick={onCancel}>
+          Cancel
+        </Button>
+        {probeFailed && (
+          <Button
+            disabled={pending}
+            onClick={() => void save({ skipCheck: true })}
+          >
+            Save anyway
+          </Button>
+        )}
+        <Button type="submit" form={formId} variant="primary" loading={pending}>
+          {editing ? "Save" : "Connect and save"}
+        </Button>
+      </ProviderDialogActions>
+    </>
+  );
+}
+
+/** Add or edit a machine in its own dialog, for flows outside Settings such
+ * as the Create agent Run on picker. */
+export function MachineEditorDialog({
+  machine,
+  onClose,
+  onSaved,
+}: {
+  machine?: RemoteMachine | undefined;
+  onClose(): void;
+  onSaved?: ((machine: RemoteMachine) => void) | undefined;
+}) {
+  const [open, setOpen] = useState(true);
+  const [pending, setPending] = useState(false);
+  const [footer, setFooter] = useState<HTMLDivElement | null>(null);
+  const urlInputRef = useRef<HTMLInputElement>(null);
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !pending) setOpen(false);
+      }}
+      onOpenChangeComplete={(next) => {
+        if (!next) onClose();
+      }}
+      title={machine ? `Edit ${machine.name}` : "Add machine"}
+      description="Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
+      size="compact"
+      initialFocus={urlInputRef}
+      preventClose={pending}
+      actions={<div ref={setFooter} className="contents" />}
+    >
+      <ProviderDialogFooter value={footer}>
+        <MachineEditorForm
+          machine={machine}
+          urlInputRef={urlInputRef}
+          onPendingChange={setPending}
+          onCancel={() => setOpen(false)}
+          onSaved={(saved) => {
+            onSaved?.(saved);
+            setOpen(false);
+          }}
+        />
+      </ProviderDialogFooter>
     </Dialog>
   );
 }
 
-export function RemoteMachinesSettings({
-  active = true,
-}: {
-  active?: boolean;
-}) {
+type ManagerView =
+  | Readonly<{ kind: "list" }>
+  | Readonly<{ kind: "add" }>
+  | Readonly<{ kind: "edit"; machine: RemoteMachine }>
+  | Readonly<{ kind: "remove"; machine: RemoteMachine }>;
+
+/** The Self-hosted provider dialog's body: the machine list, with add, edit
+ * and remove shown in place of it rather than in a second modal. */
+export function RemoteMachinesManager() {
   const machines = useRemoteMachines();
   const statuses = useRemoteMachineStatuses();
-  const [editor, setEditor] = useState<
-    { mode: "add" } | { mode: "edit"; machine: RemoteMachine } | null
-  >(null);
-  const [removing, setRemoving] = useState<RemoteMachine | null>(null);
+  const [view, setView] = useState<ManagerView>({ kind: "list" });
+  const urlInputRef = useRef<HTMLInputElement>(null);
+  const removeCancelRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const returnFocus = useRef<HTMLElement | null>(null);
 
-  useEffect(() => {
-    if (!active || machines.length === 0) return;
-    const controller = new AbortController();
-    void refreshAllRemoteMachines({ signal: controller.signal });
-    return () => controller.abort();
-  }, [active, machines.length]);
+  // The trigger, not document.activeElement: WebKit does not focus clicked buttons.
+  const open = (
+    next: Exclude<ManagerView, { kind: "list" }>,
+    trigger: HTMLElement,
+  ) => {
+    returnFocus.current = trigger;
+    setView(next);
+  };
+  const back = () => setView({ kind: "list" });
+
+  useLayoutEffect(() => {
+    if (view.kind === "add" || view.kind === "edit")
+      urlInputRef.current?.focus();
+    else if (view.kind === "remove") removeCancelRef.current?.focus();
+    else {
+      const trigger = returnFocus.current;
+      if (!trigger) return;
+      returnFocus.current = null;
+      // A removed machine takes its buttons with it.
+      (trigger.isConnected
+        ? trigger
+        : listRef.current?.querySelector<HTMLElement>("button:not([disabled])")
+      )?.focus();
+    }
+  }, [view]);
 
   const subtitleFor = (machine: RemoteMachine) => {
     const status = statuses[machine.id];
@@ -316,132 +381,151 @@ export function RemoteMachinesSettings({
   };
 
   return (
-    <div className="mt-section-gap">
-      <InlineHeader
-        title="Machines"
-        subtitle="Connect Linux or Mac computers running buzz-host so you can choose where each agent runs."
-        actions={
-          machines.length > 0 ? (
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => setEditor({ mode: "add" })}
-            >
-              <PlusIcon size={16} aria-hidden="true" />
-              Add machine
-            </Button>
-          ) : undefined
-        }
-      />
-      {machines.length === 0 ? (
-        <EmptyState
-          icon={<CloudIcon size={24} aria-hidden="true" />}
-          title="No remote machines connected"
-          description="Add a Linux or macOS machine running buzz-host to run agents remotely and keep them online while this computer is off."
-          action={
-            <Button
-              type="button"
-              variant="prominent"
-              size="sm"
-              onClick={() => setEditor({ mode: "add" })}
-            >
-              Add machine
-            </Button>
-          }
-        />
-      ) : (
-        <SettingsGroup>
-          {machines.map((machine) => {
-            const status = statuses[machine.id];
-            const platformLabel = formatPlatformLabel(machine.platform);
-            const checking = status?.state === "checking";
-            const offline = status?.state === "offline";
-            return (
-              <PreferenceRow
-                key={machine.id}
-                icon={
-                  offline ? (
-                    <CloudOffIcon size={20} aria-hidden="true" />
-                  ) : (
-                    <CloudIcon size={20} aria-hidden="true" />
-                  )
-                }
-                title={
-                  <span className="inline-flex flex-wrap items-center gap-2">
-                    <span>{machine.name}</span>
-                    {platformLabel && <Badge>{platformLabel}</Badge>}
-                    {status?.state === "online" && (
-                      <Badge tone="success">Online</Badge>
-                    )}
-                    {machine.role === "guest" && <Badge>Guest</Badge>}
-                  </span>
-                }
-                subtitle={subtitleFor(machine)}
-                trailing={
-                  <div className="flex items-center gap-1">
-                    <IconButton
-                      type="button"
-                      size="sm"
-                      aria-label={`Check ${machine.name}`}
-                      disabled={checking}
-                      icon={
-                        <ArrowsClockwiseIcon
-                          size={16}
-                          aria-hidden="true"
-                          className={
-                            checking ? "motion-safe:animate-spin" : undefined
-                          }
-                        />
-                      }
-                      onClick={() => void refreshRemoteMachine(machine.id)}
-                    />
-                    <IconButton
-                      type="button"
-                      size="sm"
-                      aria-label={`Edit ${machine.name}`}
-                      icon={<PencilSimpleIcon size={16} aria-hidden="true" />}
-                      onClick={() => setEditor({ mode: "edit", machine })}
-                    />
-                    <IconButton
-                      type="button"
-                      size="sm"
-                      aria-label={`Remove ${machine.name}`}
-                      icon={<TrashIcon size={16} aria-hidden="true" />}
-                      onClick={() => setRemoving(machine)}
-                    />
-                  </div>
-                }
-              />
-            );
-          })}
-        </SettingsGroup>
-      )}
-      {editor && (
-        <MachineEditorDialog
-          machine={editor.mode === "edit" ? editor.machine : undefined}
-          onClose={() => setEditor(null)}
-        />
-      )}
-      {removing && (
-        <AlertDialog
-          title={`Remove ${removing.name}?`}
-          description="Buzz will disconnect from this machine. Any agents already running on it keep running until removed there."
-          onClose={() => setRemoving(null)}
+    <div className="grid gap-3">
+      <div ref={listRef} hidden={view.kind !== "list"} className="grid gap-3">
+        <InlineHeader
+          title="Machines"
+          subtitle="Linux or macOS computers running buzz-host. Choose one in Run on when you create an agent."
           actions={
-            <>
-              <Button onClick={() => setRemoving(null)}>Cancel</Button>
+            machines.length > 0 ? (
               <Button
-                variant="destructive"
-                onClick={() => {
-                  removeRemoteMachine(removing.id);
-                  setRemoving(null);
-                }}
+                type="button"
+                size="sm"
+                onClick={(event) => open({ kind: "add" }, event.currentTarget)}
               >
-                Remove
+                <PlusIcon size={16} aria-hidden="true" />
+                Add machine
               </Button>
-            </>
+            ) : undefined
           }
         />
+        {machines.length === 0 ? (
+          <EmptyState
+            icon={<CloudIcon size={24} aria-hidden="true" />}
+            title="No remote machines connected"
+            description="Add a Linux or macOS machine running buzz-host to run agents remotely and keep them online while this computer is off."
+            action={
+              <Button
+                type="button"
+                variant="prominent"
+                size="sm"
+                onClick={(event) => open({ kind: "add" }, event.currentTarget)}
+              >
+                Add machine
+              </Button>
+            }
+          />
+        ) : (
+          <SettingsGroup>
+            {machines.map((machine) => {
+              const status = statuses[machine.id];
+              const platformLabel = formatPlatformLabel(machine.platform);
+              const checking = status?.state === "checking";
+              const offline = status?.state === "offline";
+              return (
+                <PreferenceRow
+                  key={machine.id}
+                  icon={
+                    offline ? (
+                      <CloudOffIcon size={20} aria-hidden="true" />
+                    ) : (
+                      <CloudIcon size={20} aria-hidden="true" />
+                    )
+                  }
+                  title={
+                    <span className="inline-flex flex-wrap items-center gap-2">
+                      <span>{machine.name}</span>
+                      {platformLabel && <Badge>{platformLabel}</Badge>}
+                      {status?.state === "online" && (
+                        <Badge tone="success">Online</Badge>
+                      )}
+                      {offline && <Badge>Offline</Badge>}
+                      {machine.role === "guest" && <Badge>Guest</Badge>}
+                    </span>
+                  }
+                  subtitle={subtitleFor(machine)}
+                  trailing={
+                    <div className="flex items-center gap-1">
+                      <IconButton
+                        type="button"
+                        size="sm"
+                        aria-label={`Check ${machine.name}`}
+                        disabled={checking}
+                        icon={
+                          <ArrowsClockwiseIcon
+                            size={16}
+                            aria-hidden="true"
+                            className={
+                              checking ? "motion-safe:animate-spin" : undefined
+                            }
+                          />
+                        }
+                        onClick={() => void refreshRemoteMachine(machine.id)}
+                      />
+                      <IconButton
+                        type="button"
+                        size="sm"
+                        aria-label={`Edit ${machine.name}`}
+                        icon={<PencilSimpleIcon size={16} aria-hidden="true" />}
+                        onClick={(event) =>
+                          open({ kind: "edit", machine }, event.currentTarget)
+                        }
+                      />
+                      <IconButton
+                        type="button"
+                        size="sm"
+                        aria-label={`Remove ${machine.name}`}
+                        icon={<TrashIcon size={16} aria-hidden="true" />}
+                        onClick={(event) =>
+                          open({ kind: "remove", machine }, event.currentTarget)
+                        }
+                      />
+                    </div>
+                  }
+                />
+              );
+            })}
+          </SettingsGroup>
+        )}
+      </div>
+      {(view.kind === "add" || view.kind === "edit") && (
+        <>
+          <InlineHeader
+            title={
+              view.kind === "edit" ? `Edit ${view.machine.name}` : "Add machine"
+            }
+            subtitle="Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
+          />
+          <MachineEditorForm
+            key={view.kind === "edit" ? view.machine.id : "add"}
+            machine={view.kind === "edit" ? view.machine : undefined}
+            urlInputRef={urlInputRef}
+            onCancel={back}
+            onSaved={back}
+          />
+        </>
+      )}
+      {view.kind === "remove" && (
+        <>
+          <InlineHeader
+            title={`Remove ${view.machine.name}?`}
+            subtitle="Buzz will disconnect from this machine. Any agents already running on it keep running until removed there."
+          />
+          <ProviderDialogActions>
+            <Button ref={removeCancelRef} onClick={back}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                removeRemoteMachine(view.machine.id);
+                back();
+              }}
+            >
+              Remove
+            </Button>
+          </ProviderDialogActions>
+        </>
       )}
     </div>
   );

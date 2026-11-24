@@ -39,11 +39,15 @@ export function AgentDefaults({
       }
     }
   }, [types]);
+  // Remote harnesses first, as in the Create agent Harness picker.
+  const ordered = [true, false].flatMap((remote) =>
+    types.filter((type) => Boolean(type.remote) === remote),
+  );
   return (
     <div className="mt-section-gap">
       <InlineHeader title="Harness defaults" />
       <SettingsGroup>
-        {types.map((type) => {
+        {ordered.map((type) => {
           if (!type.provider) return null;
           const fallback = (
             <PreferenceRow

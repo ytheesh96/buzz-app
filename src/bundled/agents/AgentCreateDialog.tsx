@@ -394,10 +394,8 @@ export function AgentCreateDialog({
     ? (remoteMachines.find((machine) => machine.id === selectedMachineId) ??
       remoteMachines[0])
     : undefined;
-  const showRunOn =
-    !reviewingSettings &&
-    !update &&
-    (Boolean(selfHostedType) || remoteMachines.length > 0);
+  // Machines are only reachable through the Remote Agents plugin's type.
+  const showRunOn = !reviewingSettings && !update && Boolean(selfHostedType);
   const [error, setError] = useState("");
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [configurationReady, setConfigurationReady] = useState(false);
@@ -496,9 +494,9 @@ export function AgentCreateDialog({
     chooseModel(item, nextConfig);
   };
   const selectMachineTarget = (machineId: string) => {
+    if (!selfHostedType) return;
     setSelectedMachineId(machineId);
     selectActiveMachine(machineId);
-    if (!selfHostedType) return;
     setAutomatic(false);
     if (type?.key !== selfHostedType.key) {
       setConfigurationReady(false);

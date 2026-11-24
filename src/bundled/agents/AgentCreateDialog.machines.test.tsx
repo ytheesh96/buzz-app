@@ -180,3 +180,30 @@ it("lets the user pick between This computer and configured remote machines and 
   );
   expect(machineForAgent(createdAgent.pubkey)?.id).toBe(linux.id);
 });
+
+it("hides Run on and leaves the active machine alone without the Remote Agents plugin", () => {
+  addRemoteMachine({
+    name: "Mac Mini",
+    url: "wss://mac-mini.example.org/_buzz-host",
+    platform: "darwin",
+  });
+  const before = activeMachineIdSnapshot();
+  const agents = { previewRetype: () => undefined } as unknown as Agents;
+
+  render(
+    <AgentCreateDialog
+      agents={agents}
+      types={[localHarness]}
+      onClose={() => {}}
+      onCreated={() => {}}
+      onCreate={vi.fn()}
+    />,
+  );
+
+  const dialog = screen.getByRole("dialog", { name: "Create agent" });
+  expect(
+    within(dialog).queryByRole("combobox", { name: "Run on" }),
+  ).not.toBeInTheDocument();
+  expect(within(dialog).queryByText("Mac Mini")).not.toBeInTheDocument();
+  expect(activeMachineIdSnapshot()).toBe(before);
+});

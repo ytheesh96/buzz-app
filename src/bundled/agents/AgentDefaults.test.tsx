@@ -219,3 +219,25 @@ it.each(["Escape", "Close"])(
     expect(screen.queryByRole("button")).toBeNull();
   },
 );
+
+it("lists remote harnesses before local ones, as the Harness picker does", () => {
+  const local = fixture().type;
+  const remote = {
+    ...fixture().type,
+    key: "local/hosted",
+    id: "hosted",
+    title: "Hosted",
+    remote: {} as NonNullable<RegisteredAgentType["remote"]>,
+  } satisfies RegisteredAgentType;
+  const types = [local, remote];
+  const agents = {
+    types: () => types,
+    subscribe: () => () => {},
+  } as unknown as Agents;
+  render(<AgentDefaults agents={agents} />);
+  expect(
+    screen
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label")),
+  ).toEqual(["Hosted, ready", "Echo, ready"]);
+});
