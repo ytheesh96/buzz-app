@@ -1,5 +1,18 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const tauriMock = vi.hoisted(() => ({
+  isTauri: vi.fn<() => boolean>(() => false),
+  invoke:
+    vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: tauriMock.isTauri,
+  invoke: tauriMock.invoke,
+}));
+
+import { resetIrohTunnelCache } from "./iroh-tunnel";
 import {
   ACTIVE_MACHINE_KEY,
   LEGACY_TOKEN_KEY,
@@ -85,6 +98,10 @@ class FakeWebSocket {
 beforeEach(() => {
   localStorage.clear();
   resetRemoteMachinesCache();
+  resetIrohTunnelCache();
+  tauriMock.isTauri.mockReset();
+  tauriMock.isTauri.mockReturnValue(false);
+  tauriMock.invoke.mockReset();
   FakeWebSocket.instances = [];
   FakeWebSocket.openImmediately = true;
   FakeWebSocket.handler = () => {};
@@ -93,6 +110,7 @@ beforeEach(() => {
 afterEach(() => {
   localStorage.clear();
   resetRemoteMachinesCache();
+  resetIrohTunnelCache();
 });
 
 describe("remote-machines", () => {
@@ -322,5 +340,206 @@ describe("remote-machines", () => {
       { type: "iroh", nodeId: "node-1" },
       { type: "wss", url: "wss://new.example.org/_buzz-host" },
     ]);
+  });
+
+  it("gates loopback tunnel ws:// URLs unless allowLoopbackTunnel is enabled", async () => {
+    FakeWebSocket.handler = (ws, msg) => {
+      if (msg.method === "hello") {
+        ws.reply(msg.id, {
+          host: "iroh-box",
+          platform: "linux",
+          role: "admin",
+        });
+      }
+      if (msg.method === "list") ws.reply(msg.id, { agents: [] });
+    };
+
+    const loopbackUrl = "ws://127.0.0.1:44444/t/deadbeef/m_1";
+    await expect(
+      probeRemoteMachine({
+        url: loopbackUrl,
+        WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+      }),
+    ).rejects.toThrow(/wss:\/\//);
+
+    const probed = await probeRemoteMachine({
+      url: loopbackUrl,
+      allowLoopbackTunnel: true,
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    expect(probed).toMatchObject({ host: "iroh-box", platform: "linux" });
+
+    // Non-tunnel loopback and non-loopback ws:// URLs remain rejected even when gated on.
+    await expect(
+      probeRemoteMachine({
+        url: "ws://127.0.0.1:44444/other",
+        allowLoopbackTunnel: true,
+        WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+      }),
+    ).rejects.toThrow(/wss:\/\//);
+    await expect(
+      probeRemoteMachine({
+        url: "ws://evil.example.org/t/deadbeef/m_1",
+        allowLoopbackTunnel: true,
+        WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+      }),
+    ).rejects.toThrow(/wss:\/\//);
+  });
+
+  it("probes iroh first in desktop mode and records activeRoute: iroh", async () => {
+    tauriMock.isTauri.mockReturnValue(true);
+    tauriMock.invoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "iroh_tunnel_available") return true;
+      if (cmd === "iroh_tunnel_endpoint") {
+        return `ws://127.0.0.1:51234/t/secret123/${String(args?.machineId)}`;
+      }
+      return undefined;
+    });
+
+    FakeWebSocket.handler = (ws, msg) => {
+      if (msg.method === "auth") ws.reply(msg.id, { role: "admin" });
+      if (msg.method === "hello") {
+        ws.reply(msg.id, {
+          host: "omarchy.iroh",
+          platform: "linux",
+          role: "admin",
+        });
+      }
+      if (msg.method === "list") {
+        ws.reply(msg.id, { agents: [{ pubkey: "aabbcc", name: "IrohBot" }] });
+      }
+    };
+
+    const machine = addRemoteMachine({
+      id: "m_dual",
+      name: "Omarchy Box",
+      token: "bha_token",
+      routes: [
+        { type: "iroh", nodeId: "node-abc", endpointAddr: "eyJpZCI6ImFiYyJ9" },
+        { type: "wss", url: "wss://omarchy.example.org/_buzz-host" },
+      ],
+    });
+
+    const result = await refreshRemoteMachine(machine.id, {
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    expect(result).toMatchObject({ host: "omarchy.iroh", platform: "linux" });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances[0]?.url).toBe(
+      "ws://127.0.0.1:51234/t/secret123/m_dual",
+    );
+    expect(remoteMachineStatusesSnapshot()[machine.id]).toMatchObject({
+      state: "online",
+      agentCount: 1,
+      activeRoute: "iroh",
+    });
+
+    removeRemoteMachine(machine.id);
+    expect(tauriMock.invoke).toHaveBeenCalledWith("iroh_tunnel_disconnect", {
+      machineId: machine.id,
+    });
+  });
+
+  it("falls back automatically from iroh to wss when the iroh probe fails", async () => {
+    tauriMock.isTauri.mockReturnValue(true);
+    tauriMock.invoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "iroh_tunnel_available") return true;
+      if (cmd === "iroh_tunnel_endpoint") {
+        return `ws://127.0.0.1:51235/t/secret123/${String(args?.machineId)}`;
+      }
+      return undefined;
+    });
+
+    FakeWebSocket.handler = (ws, msg) => {
+      if (ws.url.startsWith("ws://127.0.0.1:")) {
+        ws.close();
+        return;
+      }
+      if (msg.method === "auth") ws.reply(msg.id, { role: "admin" });
+      if (msg.method === "hello") {
+        ws.reply(msg.id, {
+          host: "fallback.example.org",
+          platform: "darwin",
+          role: "admin",
+        });
+      }
+      if (msg.method === "list") ws.reply(msg.id, { agents: [] });
+    };
+
+    const machine = addRemoteMachine({
+      id: "m_fallback",
+      name: "Fallback Mac",
+      token: "bha_token",
+      routes: [
+        { type: "iroh", nodeId: "node-xyz", endpointAddr: "eyJpZCI6Inh5eiJ9" },
+        { type: "wss", url: "wss://fallback.example.org/_buzz-host" },
+      ],
+    });
+
+    const result = await refreshRemoteMachine(machine.id, {
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    expect(result).toMatchObject({ host: "fallback.example.org" });
+    expect(FakeWebSocket.instances.map((ws) => ws.url)).toEqual([
+      "ws://127.0.0.1:51235/t/secret123/m_fallback",
+      "wss://fallback.example.org/_buzz-host",
+    ]);
+    expect(remoteMachineStatusesSnapshot()[machine.id]).toMatchObject({
+      state: "online",
+      agentCount: 0,
+      activeRoute: "wss",
+    });
+  });
+
+  it("skips iroh in non-Tauri browser environments and marks iroh-only machines offline cleanly", async () => {
+    tauriMock.isTauri.mockReturnValue(false);
+    FakeWebSocket.handler = (ws, msg) => {
+      if (msg.method === "auth") ws.reply(msg.id, { role: "admin" });
+      if (msg.method === "hello") {
+        ws.reply(msg.id, { host: "web.example.org", platform: "linux" });
+      }
+      if (msg.method === "list") ws.reply(msg.id, { agents: [] });
+    };
+
+    const dual = addRemoteMachine({
+      id: "m_web_dual",
+      name: "Web Dual",
+      token: "bha_web",
+      routes: [
+        { type: "iroh", nodeId: "node-web", endpointAddr: "eyJpZCI6IndlYiJ9" },
+        { type: "wss", url: "wss://web.example.org/_buzz-host" },
+      ],
+    });
+    await refreshRemoteMachine(dual.id, {
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    expect(FakeWebSocket.instances.map((ws) => ws.url)).toEqual([
+      "wss://web.example.org/_buzz-host",
+    ]);
+    expect(remoteMachineStatusesSnapshot()[dual.id]).toMatchObject({
+      state: "online",
+      activeRoute: "wss",
+    });
+
+    const irohOnly = addRemoteMachine({
+      id: "m_web_iroh_only",
+      name: "Iroh Only",
+      source: "discovered",
+      routes: [
+        {
+          type: "iroh",
+          nodeId: "node-only-1234567890",
+          endpointAddr: "eyJpZCI6Im9ubHkifQ",
+        },
+      ],
+    });
+    const res = await refreshRemoteMachine(irohOnly.id, {
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    expect(res).toBeUndefined();
+    expect(remoteMachineStatusesSnapshot()[irohOnly.id]).toMatchObject({
+      state: "offline",
+      error: "No reachable WebSocket route configured for this machine yet.",
+    });
   });
 });

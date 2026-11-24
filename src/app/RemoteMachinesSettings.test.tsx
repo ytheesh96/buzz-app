@@ -10,6 +10,7 @@ import { selfHostedProvider } from "../bundled/self-hosted-provider";
 import type { RegisteredAgentType } from "../features/agents/service";
 import { CloudIcon } from "../shared/design-system/icons";
 import {
+  addRemoteMachine,
   remoteMachinesSnapshot,
   resetRemoteMachinesCache,
   SELF_HOSTED_TYPE_KEY,
@@ -215,4 +216,76 @@ it("adds a machine from the standalone dialog used by Create agent", async () =>
   expect(onSaved).toHaveBeenCalledWith(
     expect.objectContaining({ name: "Mac Mini", token: "bha_secret123" }),
   );
+});
+
+it("renders Discovered and Iroh badges for an iroh-only machine and lets the user edit it without a wss:// URL", async () => {
+  const user = userEvent.setup();
+  addRemoteMachine({
+    id: "m_iroh_only",
+    name: "Omarchy Mesh",
+    source: "discovered",
+    platform: "linux",
+    routes: [
+      {
+        type: "iroh",
+        nodeId: "abcdef0123456789fedcba",
+        endpointAddr: "eyJpZCI6ImFiYyJ9",
+      },
+    ],
+  });
+
+  renderManager();
+
+  expect(screen.getByText("Omarchy Mesh")).toBeVisible();
+  expect(screen.getByText("Linux")).toBeVisible();
+  expect(screen.getByText("Iroh")).toBeVisible();
+  expect(screen.getByText("Discovered")).toBeVisible();
+  expect(screen.getByText("abcdef012345…")).toBeVisible();
+  expect(screen.queryByText("WSS")).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "Edit Omarchy Mesh" }));
+  expect(
+    screen.getByRole("heading", { name: "Edit Omarchy Mesh" }),
+  ).toBeVisible();
+  expect(screen.getByLabelText(/Server URL or pairing link/)).toHaveValue("");
+
+  await user.clear(screen.getByLabelText(/Machine name/));
+  await user.type(screen.getByLabelText(/Machine name/), "Omarchy Studio");
+  await user.type(screen.getByLabelText(/Access token/), "bha_iroh_secret");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  // In non-Tauri jsdom, probing an Iroh-only machine fails gracefully and offers Save anyway.
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    /Iroh tunnel is unavailable/,
+  );
+  await user.click(screen.getByRole("button", { name: "Save anyway" }));
+
+  expect(await screen.findByText("Omarchy Studio")).toBeVisible();
+  const saved = remoteMachinesSnapshot()[0];
+  expect(saved).toMatchObject({
+    id: "m_iroh_only",
+    name: "Omarchy Studio",
+    url: "",
+    token: "bha_iroh_secret",
+    routes: [
+      {
+        type: "iroh",
+        nodeId: "abcdef0123456789fedcba",
+        endpointAddr: "eyJpZCI6ImFiYyJ9",
+      },
+    ],
+  });
+});
+
+it("shows the active WSS badge for a wss-backed machine when online", async () => {
+  const user = userEvent.setup();
+  renderManager();
+
+  await user.click(screen.getByRole("button", { name: "Add machine" }));
+  await user.paste("wss://mac-mini.example.org/_buzz-host#token=bha_secret123");
+  await user.click(screen.getByRole("button", { name: "Connect and save" }));
+
+  expect(await screen.findByText("Online")).toBeVisible();
+  expect(screen.getByText("WSS")).toBeVisible();
+  expect(screen.queryByText("Discovered")).toBeNull();
 });

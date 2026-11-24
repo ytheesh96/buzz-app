@@ -1,4 +1,9 @@
 import { useSyncExternalStore } from "react";
+import {
+  irohTunnelDisconnect,
+  type MachineRouteType,
+  resolveMachineWebSocketCandidates,
+} from "./iroh-tunnel";
 
 export const REMOTE_MACHINES_KEY = "local.buzz-host.machines.v1";
 export const REMOTE_AGENT_HOSTS_KEY = "local.buzz-host.agent-hosts.v1";
@@ -42,6 +47,8 @@ export type RemoteMachineStatus = Readonly<{
   error?: string;
   agentCount?: number;
   checkedAt?: number;
+  /** The route the last successful check connected over. */
+  activeRoute?: MachineRouteType;
 }>;
 
 export type RemoteMachineProbeResult = Readonly<{
@@ -718,6 +725,7 @@ export function removeRemoteMachine(id: string): void {
     statusMap = Object.freeze(nextStatuses);
     emitStatuses();
   }
+  void irohTunnelDisconnect(id);
 }
 
 export function setAgentMachine(pubkey: string, machineId: string): void {
@@ -845,6 +853,9 @@ export function useRemoteMachineStatuses(): Readonly<
 
 type WebSocketConstructor = new (url: string) => WebSocket;
 
+/** The native tunnel's `ws://127.0.0.1:<port>/t/…` URLs (never user input). */
+const LOOPBACK_TUNNEL_URL = /^ws:\/\/127\.0\.0\.1:\d{1,5}\/t\//;
+
 /**
  * Connect to a buzz-host endpoint, authenticate if a token is supplied, call
  * `hello` and `list`, and close the probe socket cleanly.
@@ -855,18 +866,22 @@ export async function probeRemoteMachine({
   signal,
   timeoutMs = 15000,
   WebSocketImpl = WebSocket,
+  allowLoopbackTunnel = false,
 }: {
   url: string;
   token?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   WebSocketImpl?: WebSocketConstructor;
+  /** Also accept the native Iroh tunnel's loopback URL. */
+  allowLoopbackTunnel?: boolean;
 }): Promise<RemoteMachineProbeResult> {
   if (signal?.aborted) {
     throw new DOMException("Aborted", "AbortError");
   }
-  const parsed = parseMachineInput(url);
-  if (parsed.error) throw new Error(parsed.error);
+  const tunnelled = allowLoopbackTunnel && LOOPBACK_TUNNEL_URL.test(url);
+  const parsed = tunnelled ? { url, token: undefined } : parseMachineInput(url);
+  if ("error" in parsed && parsed.error) throw new Error(parsed.error);
   const cleanUrl = parsed.url;
   const cleanToken = (parsed.token ?? token).trim();
 
@@ -1033,8 +1048,13 @@ export async function refreshRemoteMachine(
 ): Promise<RemoteMachineProbeResult | undefined> {
   const machine = readMachinesFromStorage().find((m) => m.id === id);
   if (!machine) return undefined;
-  const wssUrl = primaryWssUrl(machine);
-  if (!wssUrl) {
+  setMachineStatus(id, {
+    ...statusMap[id],
+    state: "checking",
+  });
+  const candidates = await resolveMachineWebSocketCandidates(machine);
+  if (options?.signal?.aborted) return undefined;
+  if (!candidates.length) {
     setMachineStatus(id, {
       state: "offline",
       error: "No reachable WebSocket route configured for this machine yet.",
@@ -1042,47 +1062,57 @@ export async function refreshRemoteMachine(
     });
     return undefined;
   }
-  setMachineStatus(id, {
-    ...statusMap[id],
-    state: "checking",
-  });
-  try {
-    const result = await probeRemoteMachine({
-      url: wssUrl,
-      token: machine.token,
-      ...options,
-    });
-    const now = Date.now();
-    updateRemoteMachine(id, {
-      ...(result.platform ? { platform: result.platform } : {}),
-      ...(result.host ? { host: result.host } : {}),
-      ...(result.role ? { role: result.role } : {}),
-      ...(result.runtimes ? { runtimes: result.runtimes } : {}),
-      ...(result.capabilities ? { capabilities: result.capabilities } : {}),
-      ...(result.publicGuestUrl !== undefined
-        ? { publicGuestUrl: result.publicGuestUrl }
-        : {}),
-      lastSeen: now,
-    });
-    mergeAgentMachines(
-      id,
-      result.agents.map((a) => a.pubkey),
-    );
-    setMachineStatus(id, {
-      state: "online",
-      agentCount: result.agents.length,
-      checkedAt: now,
-    });
-    return result;
-  } catch (error) {
-    if (options?.signal?.aborted) return undefined;
-    setMachineStatus(id, {
-      state: "offline",
-      error: error instanceof Error ? error.message : String(error),
-      checkedAt: Date.now(),
-    });
-    return undefined;
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      const result = await probeRemoteMachine({
+        url: candidate.url,
+        token: machine.token,
+        allowLoopbackTunnel: candidate.routeType === "iroh",
+        ...options,
+      });
+      recordProbe(id, result, candidate.routeType);
+      return result;
+    } catch (error) {
+      if (options?.signal?.aborted) return undefined;
+      lastError = error;
+    }
   }
+  setMachineStatus(id, {
+    state: "offline",
+    error: lastError instanceof Error ? lastError.message : String(lastError),
+    checkedAt: Date.now(),
+  });
+  return undefined;
+}
+
+function recordProbe(
+  id: string,
+  result: RemoteMachineProbeResult,
+  activeRoute: MachineRouteType,
+) {
+  const now = Date.now();
+  updateRemoteMachine(id, {
+    ...(result.platform ? { platform: result.platform } : {}),
+    ...(result.host ? { host: result.host } : {}),
+    ...(result.role ? { role: result.role } : {}),
+    ...(result.runtimes ? { runtimes: result.runtimes } : {}),
+    ...(result.capabilities ? { capabilities: result.capabilities } : {}),
+    ...(result.publicGuestUrl !== undefined
+      ? { publicGuestUrl: result.publicGuestUrl }
+      : {}),
+    lastSeen: now,
+  });
+  mergeAgentMachines(
+    id,
+    result.agents.map((a) => a.pubkey),
+  );
+  setMachineStatus(id, {
+    state: "online",
+    agentCount: result.agents.length,
+    checkedAt: now,
+    activeRoute,
+  });
 }
 
 export async function refreshAllRemoteMachines(options?: {
