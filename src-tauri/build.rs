@@ -94,6 +94,7 @@ fn main() {
             "sign_out",
             "sign_out_wipe_refusal",
             "identity_prepare_remote_agent_authorization",
+            "remote_machine_decrypt_statuses",
             "identity_sign_builderlab_binding",
             "federated_identity_snapshot",
             "federated_identity_servers",

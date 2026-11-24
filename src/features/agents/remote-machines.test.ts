@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ACTIVE_MACHINE_KEY,
+  DISCOVERY_FRESHNESS_MS,
   LEGACY_TOKEN_KEY,
   LEGACY_URL_KEY,
   REMOTE_MACHINES_KEY,
@@ -12,6 +13,7 @@ import {
   formatPlatformLabel,
   machineForAgent,
   mergeAgentMachines,
+  mergeDiscoveredMachine,
   parseMachineInput,
   preferredRoute,
   primaryWssUrl,
@@ -24,6 +26,8 @@ import {
   resetRemoteMachinesCache,
   selectActiveMachine,
   setAgentMachine,
+  sweepStaleDiscoveredMachines,
+  updateDiscoveredMachineStatus,
   updateRemoteMachine,
   upsertDiscoveredMachine,
 } from "./remote-machines";
@@ -322,5 +326,163 @@ describe("remote-machines", () => {
       { type: "iroh", nodeId: "node-1" },
       { type: "wss", url: "wss://new.example.org/_buzz-host" },
     ]);
+  });
+
+  it("merges discovered machines by machineId or primary wss URL without clobbering manual fields", () => {
+    const manual = addRemoteMachine({
+      id: "manual-1",
+      name: "Workstation",
+      url: "wss://box.example.org/_buzz-host",
+      token: "bha_manual_secret",
+    });
+
+    // Matched by primary wss URL (different machineId, trailing slash difference).
+    const merged = mergeDiscoveredMachine({
+      machineId: "host-uuid-99",
+      name: "Auto Host Name",
+      platform: "linux",
+      host: "box.local",
+      runtimes: ["claude", "codex"],
+      capabilities: { desktop: true, docker: true },
+      publicGuestUrl: "wss://guest.example.org/_buzz-host",
+      routes: [
+        { type: "iroh", nodeId: "nodeabc", endpointAddr: "eyJpZCI6ImFiIn0" },
+        { type: "wss", url: "wss://box.example.org/_buzz-host/" },
+      ],
+      agents: [{ pubkey: "AA11", name: "Helper" }],
+      lastSeen: 1_700_000_000_000,
+    });
+
+    expect(merged).toMatchObject({
+      id: manual.id,
+      source: "manual",
+      name: "Workstation",
+      token: "bha_manual_secret",
+      platform: "linux",
+      host: "box.local",
+      runtimes: ["claude", "codex"],
+      capabilities: { desktop: true, docker: true },
+      publicGuestUrl: "wss://guest.example.org/_buzz-host",
+      lastSeen: 1_700_000_000_000,
+    });
+    expect(merged?.routes).toHaveLength(2);
+    expect(agentHostMapSnapshot()).toEqual({ aa11: manual.id });
+
+    // Brand-new iroh-only discovered machine uses machineId as id and source: "discovered".
+    const fresh = mergeDiscoveredMachine({
+      machineId: "omarchy-2",
+      name: "Omarchy",
+      platform: "linux",
+      routes: [{ type: "iroh", nodeId: "node777" }],
+      agents: [{ pubkey: "BB22" }],
+      lastSeen: 1_700_000_010_000,
+    });
+    expect(fresh).toMatchObject({
+      id: "omarchy-2",
+      source: "discovered",
+      name: "Omarchy",
+      url: "",
+      routes: [{ type: "iroh", nodeId: "node777" }],
+    });
+    expect(agentHostMapSnapshot()).toEqual({
+      aa11: manual.id,
+      bb22: "omarchy-2",
+    });
+
+    // Subsequent update for discovered machine updates its name and routes.
+    const renamed = mergeDiscoveredMachine({
+      machineId: "omarchy-2",
+      name: "Omarchy Studio",
+      routes: [
+        { type: "iroh", nodeId: "node777", endpointAddr: "addr2" },
+        { type: "wss", url: "wss://omarchy.example.org/_buzz-host" },
+      ],
+      agents: [{ pubkey: "CC33" }],
+      lastSeen: 1_700_000_020_000,
+    });
+    expect(renamed?.name).toBe("Omarchy Studio");
+    expect(renamed?.url).toBe("wss://omarchy.example.org/_buzz-host");
+    expect(agentHostMapSnapshot()).toEqual({
+      aa11: manual.id,
+      cc33: "omarchy-2",
+    });
+  });
+
+  it("updates discovery statuses respecting 120s freshness, stopped state, and active manual probes", async () => {
+    const base = 1_800_000_000_000;
+    const discovered = mergeDiscoveredMachine({
+      machineId: "disc-1",
+      name: "Discovered Box",
+      routes: [{ type: "iroh", nodeId: "node1" }],
+      lastSeen: base,
+    });
+    expect(discovered).toBeDefined();
+
+    // Fresh online heartbeat.
+    updateDiscoveredMachineStatus("disc-1", {
+      status: "online",
+      observedAt: base,
+      agentCount: 2,
+      now: base + 60_000,
+    });
+    expect(remoteMachineStatusesSnapshot()["disc-1"]).toMatchObject({
+      state: "online",
+      agentCount: 2,
+      checkedAt: base,
+    });
+
+    // Explicit stopped event immediately marks offline even when fresh.
+    updateDiscoveredMachineStatus("disc-1", {
+      status: "stopped",
+      observedAt: base + 70_000,
+      agentCount: 0,
+      now: base + 70_000,
+    });
+    expect(remoteMachineStatusesSnapshot()["disc-1"]).toMatchObject({
+      state: "offline",
+      agentCount: 0,
+    });
+
+    // Stale online heartbeat (> 120s old) marks offline.
+    updateDiscoveredMachineStatus("disc-1", {
+      status: "online",
+      observedAt: base,
+      agentCount: 2,
+      now: base + DISCOVERY_FRESHNESS_MS + 1,
+    });
+    expect(remoteMachineStatusesSnapshot()["disc-1"]?.state).toBe("offline");
+
+    // Re-mark online and verify sweepStaleDiscoveredMachines marks it offline after 120s,
+    // without clobbering a manually probed machine that has no discovery event.
+    FakeWebSocket.handler = (ws, msg) => {
+      if (msg.method === "hello") ws.reply(msg.id, { host: "manual.local" });
+      if (msg.method === "list") ws.reply(msg.id, { agents: [] });
+    };
+    const manual = addRemoteMachine({
+      id: "manual-probed",
+      name: "Manual Box",
+      url: "wss://manual.example.org/_buzz-host",
+    });
+    await refreshRemoteMachine(manual.id, {
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    expect(remoteMachineStatusesSnapshot()[manual.id]?.state).toBe("online");
+
+    updateDiscoveredMachineStatus("disc-1", {
+      status: "online",
+      observedAt: base,
+      agentCount: 1,
+      now: base,
+    });
+    expect(sweepStaleDiscoveredMachines(base + DISCOVERY_FRESHNESS_MS)).toBe(
+      false,
+    );
+    expect(remoteMachineStatusesSnapshot()["disc-1"]?.state).toBe("online");
+
+    expect(
+      sweepStaleDiscoveredMachines(base + DISCOVERY_FRESHNESS_MS + 1),
+    ).toBe(true);
+    expect(remoteMachineStatusesSnapshot()["disc-1"]?.state).toBe("offline");
+    expect(remoteMachineStatusesSnapshot()[manual.id]?.state).toBe("online");
   });
 });
