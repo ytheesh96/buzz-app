@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { remoteExecutionDetail } from "../agents/execution-location";
+import { useRemoteMachineForAgent } from "../agents/remote-machines";
 import { Tooltip } from "../../shared/design-system/ui/Tooltip";
 import type { ComposerSession } from "./composer-session";
 import { CloudIcon } from "../../shared/design-system/icons";
@@ -18,13 +19,18 @@ type RemoteAgentProps = {
 function useRemoteDetail({ session, viewer, pubkey }: RemoteAgentProps) {
   const choices =
     viewer && viewer === session?.viewer ? session?.agentChoices : undefined;
+  const machine = useRemoteMachineForAgent(pubkey);
   return useSyncExternalStore(
     choices?.subscribe ?? noSubscribe,
     () => {
       const agent = choices
         ?.snapshot()
         .identities.find((choice) => choice.pubkey === pubkey);
-      return remoteExecutionDetail(agent?.execution, agent?.runtime);
+      return remoteExecutionDetail(
+        agent?.execution,
+        agent?.runtime,
+        machine?.name,
+      );
     },
     () => undefined,
   );

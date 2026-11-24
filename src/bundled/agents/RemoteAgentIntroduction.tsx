@@ -27,11 +27,13 @@ export function RemoteAgentIntroduction({
   avatar,
   community,
   builderlab,
+  machineName,
 }: {
   name: string;
   avatar: AvatarSelection;
   community?: string | undefined;
   builderlab: boolean;
+  machineName?: string | undefined;
 }) {
   const [finish] = useState(
     () => endings[Math.floor(Math.random() * endings.length)] ?? endings[0],
@@ -48,7 +50,9 @@ export function RemoteAgentIntroduction({
   const hello = `Hi, I’m ${name}.`;
   const opening = builderlab
     ? "Since I’m a remote agent hosted by "
-    : "I work on another computer";
+    : machineName
+      ? `I work on ${machineName}`
+      : "I work on another computer";
   const provider = builderlab ? "Builderlab" : "";
   const ready = builderlab ? ", I’m always ready for you." : ".";
   const online = builderlab

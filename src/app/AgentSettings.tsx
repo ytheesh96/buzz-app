@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { PageNavigation } from "../features/navigation/service";
 import type { Agents } from "../features/agents/service";
 import { AgentDefaults } from "../bundled/agents/AgentDefaults";
+import { RemoteMachinesSettings } from "./RemoteMachinesSettings";
 import { Header, InlineHeader } from "../shared/design-system/ui/Header";
 
 import { SettingsGroup } from "../shared/design-system/ui/SettingsGroup";
@@ -68,6 +69,7 @@ export function AgentSettings({
           onProvider={onProvider}
         />
       )}
+      <RemoteMachinesSettings active={active} />
       <div className="mt-section-gap">
         <InlineHeader title="Agent behavior" />
         <SettingsGroup>

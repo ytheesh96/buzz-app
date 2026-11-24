@@ -67,6 +67,11 @@ import { avatarMedia } from "../../shared/avatar-source";
 import { AgentResponsePreview } from "../../features/messages/AgentResponsePreview";
 import { RemoteAgentHint } from "../../features/messages/RemoteAgentHint";
 import { remoteWorkDetail } from "../../features/agents/execution-location";
+import {
+  remoteMachineNameForAgent,
+  useRemoteAgentHosts,
+  useRemoteMachines,
+} from "../../features/agents/remote-machines";
 
 const noSubscribe = () => () => {};
 export type ActivityAgents = WorkStopAgents;
@@ -156,6 +161,8 @@ function MessageActivity(
     hasWork ? session.agentChoices.subscribe : noSubscribe,
     session.agentChoices.snapshot,
   );
+  useRemoteMachines();
+  useRemoteAgentHosts();
   const resolveName = useChannelIdentityNames(session, channelId);
   const keys = entries.map((entry) => entry.agent);
   const identityKeys = keys.join(":");
@@ -238,7 +245,11 @@ function MessageActivity(
         name: named(entry.agent),
         picture: profiles.get(entry.agent)?.picture,
         remoteStatus: session.viewer
-          ? remoteWorkDetail(choice?.execution, choice?.runtime)
+          ? remoteWorkDetail(
+              choice?.execution,
+              choice?.runtime,
+              remoteMachineNameForAgent(entry.agent),
+            )
           : undefined,
         working: entry.working,
         state: entry.state,
