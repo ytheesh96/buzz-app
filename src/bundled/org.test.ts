@@ -7,8 +7,14 @@ afterEach(() => {
   vi.resetModules();
 });
 
-it("bundles no organization plugins here, and lists any after the rest", () => {
-  expect(orgPlugins).toEqual([]);
+it("bundles Remote Agents and Viewport after the rest", () => {
+  expect(orgPlugins.map(({ manifest }) => manifest.id)).toEqual([
+    "local.buzz-host",
+    "local.buzz-host.viewport",
+  ]);
+  expect(orgPlugins.every(({ enabledByDefault }) => enabledByDefault)).toBe(
+    true,
+  );
   expect(
     bundledPlugins.slice(bundledPlugins.length - orgPlugins.length),
   ).toEqual(orgPlugins);

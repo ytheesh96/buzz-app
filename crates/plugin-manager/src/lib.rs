@@ -633,7 +633,12 @@ fn enabled_by_default(id: &str) -> bool {
         .any(|plugin| plugin.manifest.id == id && plugin.enabled_by_default)
 }
 /// Bundled ids that older profiles may still hold as installed plugins.
-const FORMERLY_INSTALLED: &[&str] = &["buzz.claude-code", "buzz.codex"];
+const FORMERLY_INSTALLED: &[&str] = &[
+    "buzz.claude-code",
+    "buzz.codex",
+    "local.buzz-host",
+    "local.buzz-host.viewport",
+];
 /// Host-owned features stay reserved even though they have no catalog entries.
 const BUILT_IN: &[&str] = &["buzz.emoji", "buzz.mentions", "buzz.plugin-requests"];
 fn is_bundled(id: &str) -> bool {
