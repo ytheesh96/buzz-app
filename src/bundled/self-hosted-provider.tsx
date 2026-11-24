@@ -15,6 +15,7 @@ import {
   subscribeRemoteMachines,
   subscribeRemoteMachineStatuses,
 } from "../features/agents/remote-machines";
+import { startRemoteMachineDiscovery } from "../features/agents/remote-machine-discovery";
 import type { PluginModule } from "../plugins/api";
 import { CloudIcon } from "../shared/design-system/icons";
 
@@ -106,5 +107,16 @@ function withProvider(ctx: Context): Context {
 
 /** The Remote Agents plugin, with the Self-hosted provider attached. */
 export function withSelfHostedProvider(module: PluginModule): PluginModule {
-  return { ...module, apply: (ctx) => module.apply(withProvider(ctx)) };
+  return {
+    ...module,
+    apply(ctx) {
+      ctx.effect(() =>
+        startRemoteMachineDiscovery({
+          relay: ctx.reflect.get("relay"),
+          communityReader: ctx.reflect.get("communityReader"),
+        }),
+      );
+      return module.apply(withProvider(ctx));
+    },
+  };
 }

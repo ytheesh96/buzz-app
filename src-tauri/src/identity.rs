@@ -1747,6 +1747,32 @@ pub async fn identity_export(host: tauri::State<'_, IdentityHost>) -> Result<Str
 pub(crate) mod tests;
 
 impl IdentityHost {
+    /// NIP-44 v2 plaintext one peer sent this identity. Host-owned, purpose-bound
+    /// callers only (they validate it); never expose it as a webview command.
+    pub(crate) async fn decrypt_from_peer(
+        &self,
+        peer_pubkey_hex: &str,
+        ciphertext: &str,
+    ) -> Result<String> {
+        if ciphertext.len() > 64 * 1024 {
+            return Err("Invalid encrypted record".into());
+        }
+        let peer = nostr::key::PublicKey::from_hex(peer_pubkey_hex)
+            .map_err(|_| "Invalid encrypted record")?;
+        let ciphertext = ciphertext.to_owned();
+        with_identity(self.clone(), move |identity| {
+            identity.restore()?;
+            let State::Ready(key) = &identity.state else {
+                return Err("Set up your identity first".into());
+            };
+            let secret = NostrSecretKey::from_slice(key.0.as_ref()).map_err(|_| INVALID)?;
+            let conversation = nip44::v2::ConversationKey::derive(&secret, &peer)
+                .map_err(|_| "Invalid encrypted record")?;
+            decrypt_with_conversation(&conversation, &ciphertext)
+        })
+        .await
+    }
+
     /// Only recipe plaintext may cross this boundary. Never export arbitrary decrypt.
     pub(crate) async fn kit_cipher(&self, ciphertext: String, encrypt: bool) -> Result<String> {
         with_identity(self.clone(), move |identity| {

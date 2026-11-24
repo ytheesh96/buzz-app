@@ -49,6 +49,7 @@ mod mesh_compute;
 use mesh_compute::MeshHost;
 mod identity;
 mod native_mcp;
+mod remote_machines;
 mod nsec_backup;
 mod nsec_backup_choice;
 mod nsec_backup_config;
@@ -767,6 +768,7 @@ fn commands<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Sen
         nsec_backup_choice,
         nsec_backup_set_choice,
         identity_prepare_remote_agent_authorization,
+        remote_machines::remote_machine_decrypt_statuses,
         identity_sign_builderlab_binding,
         federated_identity::federated_identity_snapshot,
         federated_identity::federated_identity_servers,
