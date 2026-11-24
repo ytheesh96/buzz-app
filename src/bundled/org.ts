@@ -10,12 +10,13 @@ import type { BundledPlugin } from "../plugins/manager";
 import * as remoteAgents from "../../plugins/remote-agents/plugin.js";
 import * as viewport from "../../plugins/viewport/plugin.js";
 import listed from "./org.json";
+import { withSelfHostedProvider } from "./self-hosted-provider";
 
 type Listed = Readonly<{ manifest: PluginManifest; enabledByDefault: boolean }>;
 
 /** Each listed plugin's code, by manifest id. */
 const modules: Readonly<Record<string, PluginModule>> = {
-  "local.buzz-host": remoteAgents,
+  "local.buzz-host": withSelfHostedProvider(remoteAgents),
   "local.buzz-host.viewport": viewport,
 };
 

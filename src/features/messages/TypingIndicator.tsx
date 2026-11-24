@@ -35,6 +35,11 @@ import {
 import { AgentResponsePreview } from "./AgentResponsePreview";
 import { RemoteAgentHint, RemoteWorkIcon } from "./RemoteAgentHint";
 import { remoteWorkDetail } from "../agents/execution-location";
+import {
+  remoteMachineNameForAgent,
+  useRemoteAgentHosts,
+  useRemoteMachines,
+} from "../agents/remote-machines";
 import { ActivityStepPreview, activityStepLabel } from "./ActivityStepPreview";
 import { AgentActivityRow } from "../agents/AgentActivityRow";
 import { NavigationCard } from "../../shared/design-system/ui/NavigationItem";
@@ -355,6 +360,8 @@ export function TypingIndicator({
     session.profiles.subscribe,
     session.profiles.snapshot,
   );
+  useRemoteMachines();
+  useRemoteAgentHosts();
   // Read only the already-loaded channel window to name threads. No ensure/read.
   const needsRows = agents.length > 0 && !threadRootId;
   const subscribeRows = useCallback(
@@ -456,7 +463,11 @@ export function TypingIndicator({
     const picture = profiles.get(pubkey)?.picture;
     const agent = choices.identities.find((choice) => choice.pubkey === pubkey);
     const remoteDetail = session.viewer
-      ? remoteWorkDetail(agent?.execution, agent?.runtime)
+      ? remoteWorkDetail(
+          agent?.execution,
+          agent?.runtime,
+          remoteMachineNameForAgent(pubkey),
+        )
       : undefined;
     const status = work
       ? localWorkLabel(work)

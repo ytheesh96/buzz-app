@@ -6,21 +6,25 @@ export type AgentExecutionLocation = "remote" | "local";
 export function remoteExecutionDetail(
   execution: AgentExecutionLocation | undefined,
   runtime?: string,
+  machineName?: string,
 ) {
   if (execution !== "remote") return undefined;
-  return runtime === "block.builderlab/builderlab"
-    ? "Runs remotely on Builderlab"
-    : "Runs on a remote machine";
+  if (runtime === "block.builderlab/builderlab")
+    return "Runs remotely on Builderlab";
+  return machineName ? `Runs on ${machineName}` : "Runs on a remote machine";
 }
 
 /** Active fallback when current work has no step details. */
 export function remoteWorkDetail(
   execution: AgentExecutionLocation | undefined,
   runtime?: string,
+  machineName?: string,
 ) {
   if (execution !== "remote") return undefined;
-  return runtime === "block.builderlab/builderlab"
-    ? "Running remotely on Builderlab…"
+  if (runtime === "block.builderlab/builderlab")
+    return "Running remotely on Builderlab…";
+  return machineName
+    ? `Running on ${machineName}…`
     : "Running on a remote machine…";
 }
 

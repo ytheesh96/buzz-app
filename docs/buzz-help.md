@@ -1621,6 +1621,11 @@ If an agent reports incompatible synced settings, choose the **Previous Versions
   Builderlab permissions are re-read at most once a minute while the app uses
   them, so a newly granted or removed permission applies without signing in
   again; a failed check keeps the previous permissions.
+  With the Remote Agents plugin enabled, **Self-hosted** is listed beside
+  Builderlab. Its dialog adds, checks, edits and removes the Linux or macOS
+  machines running buzz-host that this app connects to; a pairing link
+  (`wss://…#token=…`) fills in the access token. **Run on** in Create agent
+  picks one of these machines.
   Claude uses your own Claude setup when one already works on this computer,
   such as Amazon Bedrock or Google Vertex AI, configured with the Claude CLI. Buzz never changes that setup or adds its
   key to it. Without one, Claude runs with an Anthropic API key pasted under

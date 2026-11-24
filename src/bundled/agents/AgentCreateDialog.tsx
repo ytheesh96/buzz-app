@@ -45,7 +45,23 @@ import {
   applySettingsProposal,
   type AgentSettingsProposal,
 } from "../../features/agents/settings-proposal";
-import { PlugIcon, RobotIcon } from "../../shared/design-system/icons";
+import {
+  CloudIcon,
+  CpuIcon,
+  PlugIcon,
+  PlusIcon,
+  RobotIcon,
+} from "../../shared/design-system/icons";
+import {
+  activeMachineIdSnapshot,
+  formatPlatformLabel,
+  selectActiveMachine,
+  SELF_HOSTED_TYPE_KEY,
+  setAgentMachine,
+  useRemoteMachines,
+  useRemoteMachineStatuses,
+} from "../../features/agents/remote-machines";
+import { MachineEditorDialog } from "../../app/RemoteMachinesSettings";
 import { Tooltip } from "../../shared/design-system/ui/Tooltip";
 import { Button } from "../../shared/design-system/ui/Button";
 import { Dialog } from "../../shared/design-system/ui/Dialog";
@@ -364,6 +380,22 @@ export function AgentCreateDialog({
   const [dirty, setDirty] = useState(Boolean(update));
   const [pending, setPending] = useState(false);
   const [showRemoteIntro, setShowRemoteIntro] = useState(false);
+  const remoteMachines = useRemoteMachines();
+  const machineStatuses = useRemoteMachineStatuses();
+  const selfHostedType = types.find(
+    (item) => item.key === SELF_HOSTED_TYPE_KEY,
+  );
+  const [selectedMachineId, setSelectedMachineId] = useState(
+    () => activeMachineIdSnapshot() ?? "",
+  );
+  const [addingMachine, setAddingMachine] = useState(false);
+  const isSelfHostedSelected = type?.key === SELF_HOSTED_TYPE_KEY;
+  const selectedMachine = isSelfHostedSelected
+    ? (remoteMachines.find((machine) => machine.id === selectedMachineId) ??
+      remoteMachines[0])
+    : undefined;
+  // Machines are only reachable through the Remote Agents plugin's type.
+  const showRunOn = !reviewingSettings && !update && Boolean(selfHostedType);
   const [error, setError] = useState("");
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [configurationReady, setConfigurationReady] = useState(false);
@@ -446,7 +478,64 @@ export function AgentCreateDialog({
     if (!item || key === type?.key) return;
     restoreHarnessFocus.current = item.key;
     setConfigurationReady(false);
-    chooseModel(item, carried(item));
+    const nextConfig = carried(item);
+    if (item.key === SELF_HOSTED_TYPE_KEY) {
+      const targetId = selectedMachineId || remoteMachines[0]?.id || "";
+      if (targetId) {
+        setSelectedMachineId(targetId);
+        selectActiveMachine(targetId);
+        chooseModel(item, {
+          ...(nextConfig && typeof nextConfig === "object" ? nextConfig : {}),
+          machineId: targetId,
+        });
+        return;
+      }
+    }
+    chooseModel(item, nextConfig);
+  };
+  const selectMachineTarget = (machineId: string) => {
+    if (!selfHostedType) return;
+    setSelectedMachineId(machineId);
+    selectActiveMachine(machineId);
+    setAutomatic(false);
+    if (type?.key !== selfHostedType.key) {
+      setConfigurationReady(false);
+    }
+    const base =
+      type?.key === selfHostedType.key ? config : carried(selfHostedType);
+    chooseModel(selfHostedType, {
+      ...(base && typeof base === "object" ? base : {}),
+      machineId,
+    });
+  };
+  const selectRunOn = (value: string) => {
+    if (value === "__add_machine__") {
+      setAddingMachine(true);
+      return;
+    }
+    if (value === "local") {
+      const localType =
+        (pick && !pick.type.remote ? pick.type : undefined) ??
+        types.find((item) => !item.remote);
+      if (!localType) return;
+      if (recommendable) setAutomatic(true);
+      if (localType.key !== type?.key) {
+        setConfigurationReady(false);
+        chooseModel(localType, carried(localType));
+      }
+      return;
+    }
+    if (value === "self-hosted" && selfHostedType) {
+      setAutomatic(false);
+      if (type?.key !== selfHostedType.key) {
+        setConfigurationReady(false);
+        chooseModel(selfHostedType, carried(selfHostedType));
+      }
+      return;
+    }
+    if (value.startsWith("machine:")) {
+      selectMachineTarget(value.slice("machine:".length));
+    }
   };
   /** Automatic, or the harness and model chosen manually. */
   const chooseAutomatic = (on: boolean) => {
@@ -514,8 +603,17 @@ export function AgentCreateDialog({
               }
             : {}),
       };
-      if (update) await update.onSave(input);
-      else onCreated(await (onCreate ? onCreate(input) : agents.create(input)));
+      if (update) {
+        await update.onSave(input);
+      } else {
+        const created = await (onCreate
+          ? onCreate(input)
+          : agents.create(input));
+        if (type.key === SELF_HOSTED_TYPE_KEY && selectedMachine) {
+          setAgentMachine(created.pubkey, selectedMachine.id);
+        }
+        onCreated(created);
+      }
     } catch (reason) {
       setPending(false);
       if (settings) throw reason;
@@ -796,6 +894,140 @@ export function AgentCreateDialog({
               reveal(event.target instanceof HTMLElement ? event.target : null)
             }
           >
+            {showRunOn && (
+              <SettingsGroup>
+                <PreferenceRow
+                  title="Run on"
+                  subtitle={
+                    isSelfHostedSelected
+                      ? selectedMachine
+                        ? [
+                            formatPlatformLabel(selectedMachine.platform),
+                            selectedMachine.capabilities?.desktop === false
+                              ? "No remote desktop"
+                              : undefined,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ") || undefined
+                        : "Connect a machine to run remote agents."
+                      : undefined
+                  }
+                  trailing={
+                    <Select
+                      label="Run on"
+                      variant="compact"
+                      align="end"
+                      disabled={pending}
+                      leading={
+                        isSelfHostedSelected ? (
+                          <CloudIcon size={20} aria-hidden="true" />
+                        ) : (
+                          <CpuIcon size={20} aria-hidden="true" />
+                        )
+                      }
+                      value={
+                        isSelfHostedSelected
+                          ? selectedMachine
+                            ? `machine:${selectedMachine.id}`
+                            : "self-hosted"
+                          : "local"
+                      }
+                      groups={[
+                        {
+                          label: "",
+                          options: [
+                            {
+                              value: "local",
+                              label: "This computer",
+                              leading: <CpuIcon size={20} aria-hidden="true" />,
+                            },
+                          ],
+                        },
+                        ...(remoteMachines.length > 0
+                          ? [
+                              {
+                                label: "Remote machines",
+                                options: remoteMachines.map((machine) => {
+                                  const status = machineStatuses[machine.id];
+                                  const platform = formatPlatformLabel(
+                                    machine.platform,
+                                  );
+                                  const stateLabel =
+                                    status?.state === "online"
+                                      ? "Online"
+                                      : status?.state === "offline"
+                                        ? "Offline"
+                                        : "";
+                                  return {
+                                    value: `machine:${machine.id}`,
+                                    label: machine.name,
+                                    description:
+                                      [platform, stateLabel]
+                                        .filter(Boolean)
+                                        .join(" · ") || undefined,
+                                    leading: (
+                                      <CloudIcon size={20} aria-hidden="true" />
+                                    ),
+                                  };
+                                }),
+                              },
+                            ]
+                          : selfHostedType
+                            ? [
+                                {
+                                  label: "Remote machines",
+                                  options: [
+                                    {
+                                      value: "self-hosted",
+                                      label: selfHostedType.title,
+                                      leading: (
+                                        <CloudIcon
+                                          size={20}
+                                          aria-hidden="true"
+                                        />
+                                      ),
+                                    },
+                                  ],
+                                },
+                              ]
+                            : []),
+                        {
+                          label: "",
+                          separator: true,
+                          options: [
+                            {
+                              value: "__add_machine__",
+                              label: "Add machine…",
+                              leading: (
+                                <PlusIcon size={20} aria-hidden="true" />
+                              ),
+                            },
+                          ],
+                        },
+                      ]}
+                      onValueChange={selectRunOn}
+                    />
+                  }
+                />
+                {isSelfHostedSelected && remoteMachines.length === 0 && (
+                  <PreferenceRow
+                    icon={<CloudIcon size={20} aria-hidden="true" />}
+                    title="No remote machine added"
+                    subtitle="Paste a buzz-host pairing link or server URL to run agents on another Linux or Mac computer."
+                    trailing={
+                      <Button
+                        type="button"
+                        variant="prominent"
+                        size="sm"
+                        onClick={() => setAddingMachine(true)}
+                      >
+                        Add machine
+                      </Button>
+                    }
+                  />
+                )}
+              </SettingsGroup>
+            )}
             {reviewingSettings ? (
               <SettingsGroup>{harnessControl}</SettingsGroup>
             ) : recommendable && !type?.remote ? (
@@ -863,7 +1095,11 @@ export function AgentCreateDialog({
               </SettingsGroup>
             ) : Configuration ? (
               <Configuration
-                key={type.key}
+                key={
+                  isSelfHostedSelected
+                    ? `${type.key}:${selectedMachine?.id ?? ""}`
+                    : type.key
+                }
                 {...(edited ? { agent: edited } : {})}
                 config={config}
                 disabled={pending}
@@ -940,9 +1176,16 @@ export function AgentCreateDialog({
             avatar={avatar}
             community={community}
             builderlab={type?.key === "block.builderlab/builderlab"}
+            machineName={selectedMachine?.name}
           />
           {errorMessage}
         </div>
+      )}
+      {addingMachine && (
+        <MachineEditorDialog
+          onClose={() => setAddingMachine(false)}
+          onSaved={(saved) => selectMachineTarget(saved.id)}
+        />
       )}
     </Dialog>
   );

@@ -86,6 +86,11 @@ import { ProfileBackdrop } from "../../features/profiles/ProfileBackdrop";
 import hero from "../../features/profiles/ProfileHero.module.css";
 import { writeClipboardText } from "../../shared/clipboard";
 import { SettingsSectionLink } from "../../features/navigation/SettingsSectionLink";
+import {
+  formatPlatformLabel,
+  useRemoteMachineForAgent,
+} from "../../features/agents/remote-machines";
+import { Badge } from "../../shared/design-system/ui/Badge";
 
 export function AgentDetails({
   agents,
@@ -288,6 +293,7 @@ export function AgentDetails({
   };
   const [copyError, setCopyError] = useState("");
   const npub = canonicalPublicKey(agent.pubkey);
+  const remoteMachine = useRemoteMachineForAgent(agent.pubkey);
   const settings = useAgentSettingsHost({ agents, agent, type, types });
   useEffect(() => {
     if (!copied) return;
@@ -531,6 +537,21 @@ export function AgentDetails({
                 <div>
                   <InlineHeader title="Agent details" level={4} />
                   <SettingsGroup>
+                    {remoteMachine && (
+                      <PreferenceRow
+                        title="Runs on"
+                        subtitle={
+                          <span className="inline-flex flex-wrap items-center gap-2">
+                            <span>{remoteMachine.name}</span>
+                            {formatPlatformLabel(remoteMachine.platform) && (
+                              <Badge>
+                                {formatPlatformLabel(remoteMachine.platform)}
+                              </Badge>
+                            )}
+                          </span>
+                        }
+                      />
+                    )}
                     <PreferenceRow
                       title="Public key"
                       subtitle={
