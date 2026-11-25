@@ -1217,7 +1217,7 @@ function ModelField({ React, client, runtime, profile, value, onChange, disabled
 	const input = h(Text, {
 		value,
 		disabled,
-		placeholder: models === void 0 ? "Loading models… (blank = runtime default)" : "Model id (blank = runtime default)",
+		placeholder: models === void 0 ? "Loading models… (blank = harness default)" : "Model id (blank = harness default)",
 		onChange: (e) => onChange(e.target.value)
 	});
 	let body;
@@ -1237,7 +1237,7 @@ function ModelField({ React, client, runtime, profile, value, onChange, disabled
 		options: [
 			{
 				value: "",
-				label: "Provider: runtime default"
+				label: "Provider: harness default"
 			},
 			...groups.map((g) => ({
 				value: g.key,
@@ -1260,7 +1260,7 @@ function ModelField({ React, client, runtime, profile, value, onChange, disabled
 			label: m.label
 		}))] : [{
 			value: "",
-			label: value ? value : "Runtime default"
+			label: value ? value : "Harness default"
 		}]
 	}));
 	else body = h(Select, {
@@ -1270,7 +1270,7 @@ function ModelField({ React, client, runtime, profile, value, onChange, disabled
 		options: [
 			{
 				value: "",
-				label: "Runtime default"
+				label: "Harness default"
 			},
 			...known.map((m) => ({
 				value: m.id,
@@ -1858,8 +1858,8 @@ function createType({ React, client, ctx, uiKit, invalidateCatalog, ActivityTab,
 		].filter(Boolean).join(" · ");
 	}
 	/**
-	* Runtime, Hermes profile, Model, Concurrency, Access and Runner rows, for a
-	* SettingsGroup. With `collapsible` (the Create popup), only Runtime and
+	* Harness, Hermes profile, Model, Concurrency, Access and Runner rows, for a
+	* SettingsGroup. With `collapsible` (the Create popup), only Harness and
 	* Model show; the rest sit behind a "More options" row whose subtitle names
 	* their current values, so the defaults stay visible without crowding.
 	*/
@@ -1895,7 +1895,7 @@ function createType({ React, client, ctx, uiKit, invalidateCatalog, ActivityTab,
 			})
 		});
 		return h(React.Fragment, null, h(ui.Select, {
-			label: "Runtime",
+			label: "Harness",
 			variant: "preference",
 			value: effective.runtime,
 			disabled,
@@ -1912,8 +1912,8 @@ function createType({ React, client, ctx, uiKit, invalidateCatalog, ActivityTab,
 			groupByFamily: choice.byFamily,
 			value: effective.model,
 			allowCustomModel: true,
-			defaultLabel: "Runtime default",
-			defaultDescription: "The model this runtime uses on the server",
+			defaultLabel: "Harness default",
+			defaultDescription: "The model this harness uses on the server",
 			loading: models === void 0,
 			disabled,
 			...error ? { description: `Model list unavailable: ${error}` } : {},
@@ -1997,7 +1997,7 @@ function createType({ React, client, ctx, uiKit, invalidateCatalog, ActivityTab,
 					s.runner && s.runner !== "host" && s.runner,
 					s.respondTo && s.respondTo !== "owner-only" && s.respondTo,
 					s.profile && `profile ${s.profile}`,
-					s.model || "runtime default"
+					s.model || "harness default"
 				].filter(Boolean).join(" · ");
 				setState({ text });
 			}, (e) => !controller.signal.aborted && setState({ text: String(e.message ?? e) }));
@@ -2131,7 +2131,7 @@ function createType({ React, client, ctx, uiKit, invalidateCatalog, ActivityTab,
 			display: "grid",
 			gap: "var(--space-3)"
 		} }, h(Row, {
-			label: "Runtime",
+			label: "Harness",
 			hint: "Runs on the server with buzz-acp; uses that machine's sign-ins."
 		}, h(Select, {
 			value: draft.runtime,
@@ -2494,7 +2494,7 @@ function createType({ React, client, ctx, uiKit, invalidateCatalog, ActivityTab,
 			const machine = client.machineFor?.(pubkey);
 			const hostDisplay = (machine?.url || client.snapshot().url || "").replace(/^wss:\/\//, "");
 			return `Runs on ${machine?.name && machine.name !== "Remote machine" ? `${machine.name} (${hostDisplay})` : `buzz-host (${hostDisplay})`}${loaded.runtime === "hermes" ? ` · Hermes profile ${loaded.profile || "default"}` : ""} · service ${loaded.status}. Up to ${loaded.concurrency} parallel conversations.`;
-		})()), h(Row, { label: "Runtime" }, h(Select, {
+		})()), h(Row, { label: "Harness" }, h(Select, {
 			value: draft.runtime,
 			disabled: !!busy,
 			options: runtimeOptionsFor(serverInfo),
@@ -3704,7 +3704,7 @@ function createServerCard({ React, client, uiKit, Btn, relay }) {
 		return h("div", { style: {
 			display: "grid",
 			gap: "var(--space-3)"
-		} }, h(Note, null, "Agents of type Self-hosted run on a buzz-host server. Create them in Agents → New agent → Harness → Remote → Self-hosted. In a chat, tag the agent with /model, /effort, /runtime, /new, /stop, /status or /help to control that chat (or thread)."), h(Row, {
+		} }, h(Note, null, "Agents of type Self-hosted run on a buzz-host server. Create one in Agents → New agent by picking a machine under Run on. In a chat, tag the agent with /model, /effort, /runtime, /new, /stop, /status or /help to control that chat (or thread)."), h(Row, {
 			label: "Server (or paste invite link)",
 			hint: "Admin: your wss:// tailscale serve address, or an admin link (#token=bha_…) for any wss:// tunnel. Guest: paste the invite link from your host."
 		}, h(Text, {
