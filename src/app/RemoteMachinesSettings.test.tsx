@@ -118,7 +118,7 @@ it("adds a machine from a 1-paste pairing link, shows platform/online status, an
 
   // Add replaces the list in place rather than stacking a second modal.
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  const urlInput = screen.getByLabelText("Server URL or pairing link");
+  const urlInput = screen.getByLabelText("Pairing link or server address");
   expect(urlInput).toHaveFocus();
   await user.paste("wss://mac-mini.example.org/_buzz-host#token=bha_secret123");
   expect(urlInput).toHaveValue("wss://mac-mini.example.org/_buzz-host");
@@ -126,13 +126,14 @@ it("adds a machine from a 1-paste pairing link, shows platform/online status, an
     "placeholder",
     "Mac Mini",
   );
-  expect(screen.getByLabelText(/Access token/)).toHaveValue("bha_secret123");
+  expect(screen.getByText("Access token detected")).toBeVisible();
+  expect(screen.queryByLabelText(/Access token/)).toBeNull();
 
   await user.click(screen.getByRole("button", { name: "Connect and save" }));
 
   expect(await screen.findByText("Mac Mini")).toBeVisible();
   expect(screen.getByRole("dialog", { name: "Self-hosted" })).toBeVisible();
-  expect(screen.queryByLabelText("Server URL or pairing link")).toBeNull();
+  expect(screen.queryByLabelText("Pairing link or server address")).toBeNull();
   expect(screen.getByText("macOS")).toBeVisible();
   expect(await screen.findByText("Online")).toBeVisible();
   expect(remoteMachinesSnapshot()).toHaveLength(1);
@@ -158,7 +159,7 @@ it("returns to the list when editing is cancelled, focusing the row's Edit butto
 
   await user.click(edit);
   expect(screen.getByRole("heading", { name: "Edit Mac Mini" })).toBeVisible();
-  expect(screen.getByLabelText("Server URL or pairing link")).toHaveValue(
+  expect(screen.getByLabelText("Pairing link or server address")).toHaveValue(
     "wss://mac-mini.example.org/_buzz-host",
   );
   await user.click(screen.getByRole("button", { name: "Cancel" }));
@@ -172,7 +173,7 @@ it("lets the user save an offline machine anyway when the initial probe fails", 
 
   await user.click(screen.getByRole("button", { name: "Add machine" }));
   await user.type(
-    screen.getByLabelText("Server URL or pairing link"),
+    screen.getByLabelText("Pairing link or server address"),
     "wss://offline-box.example.org/_buzz-host#token=bha_offline",
   );
   await user.click(screen.getByRole("button", { name: "Connect and save" }));
@@ -191,7 +192,7 @@ it("moves a typed pairing link's token into the token field on blur, not while t
   const user = userEvent.setup();
   render(<MachineEditorDialog onClose={() => {}} />);
 
-  const urlInput = screen.getByLabelText("Server URL or pairing link");
+  const urlInput = screen.getByLabelText("Pairing link or server address");
   await user.type(urlInput, "wss://box.example.org/_buzz-host#token=bha_typed");
   // Typing is never interrupted mid-entry.
   expect(urlInput).toHaveValue(
@@ -201,7 +202,20 @@ it("moves a typed pairing link's token into the token field on blur, not while t
 
   await user.tab();
   expect(urlInput).toHaveValue("wss://box.example.org/_buzz-host");
+  expect(screen.getByText("Access token detected")).toBeVisible();
+  // The token can still be reviewed or replaced.
+  await user.click(screen.getByRole("button", { name: "Change" }));
   expect(screen.getByLabelText(/Access token/)).toHaveValue("bha_typed");
+});
+
+it("shows the manual address and an optional token field without CLI jargon", () => {
+  render(<MachineEditorDialog onClose={() => {}} />);
+  expect(screen.getByLabelText(/Access token/)).toHaveValue("");
+  expect(screen.queryByText("Access token detected")).toBeNull();
+  const form = screen.getByRole("dialog");
+  expect(form.textContent).not.toMatch(
+    /bha_|bhg_|buzz-host-tokens|Funnel|zrok/,
+  );
 });
 
 it("adds a machine from the standalone dialog used by Create agent", async () => {
@@ -211,7 +225,7 @@ it("adds a machine from the standalone dialog used by Create agent", async () =>
   render(<MachineEditorDialog onClose={onClose} onSaved={onSaved} />);
 
   expect(screen.getByRole("dialog", { name: /Add machine/ })).toBeVisible();
-  await user.click(screen.getByLabelText("Server URL or pairing link"));
+  await user.click(screen.getByLabelText("Pairing link or server address"));
   await user.paste("wss://mac-mini.example.org/_buzz-host#token=bha_secret123");
   await user.click(screen.getByRole("button", { name: "Connect and save" }));
 
@@ -250,7 +264,9 @@ it("renders Discovered and Iroh badges for an iroh-only machine and lets the use
   expect(
     screen.getByRole("heading", { name: "Edit Omarchy Mesh" }),
   ).toBeVisible();
-  expect(screen.getByLabelText(/Server URL or pairing link/)).toHaveValue("");
+  expect(screen.getByLabelText(/Pairing link or server address/)).toHaveValue(
+    "",
+  );
 
   await user.clear(screen.getByLabelText(/Machine name/));
   await user.type(screen.getByLabelText(/Machine name/), "Omarchy Studio");

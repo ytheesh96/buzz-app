@@ -100,6 +100,9 @@ export function MachineEditorForm({
   const [rawUrl, setRawUrl] = useState(machine ? primaryWssUrl(machine) : "");
   const [name, setName] = useState(machine?.name ?? "");
   const [token, setToken] = useState(machine?.token ?? "");
+  // A token that arrived with a pairing link, or that is already saved, is
+  // shown as detected instead of as a field to retype.
+  const [tokenDetected, setTokenDetected] = useState(Boolean(machine?.token));
   const [urlError, setUrlError] = useState<string | undefined>();
   const [submitError, setSubmitError] = useState("");
   const [probeFailed, setProbeFailed] = useState(false);
@@ -126,6 +129,7 @@ export function MachineEditorForm({
     if (parsed.error || !parsed.token) return false;
     setRawUrl(parsed.url);
     setToken(parsed.token);
+    setTokenDetected(true);
     clearErrors();
     return true;
   };
@@ -279,18 +283,18 @@ export function MachineEditorForm({
         }}
       >
         <Field
-          label="Server URL or pairing link"
+          label="Pairing link or server address"
           optional={irohOnlyCapable}
           description={
             irohOnlyCapable
-              ? "Optional fallback over Tailscale Funnel, zrok, or any wss:// proxy. This machine already has an Iroh route."
-              : "Works over Tailscale Funnel, zrok, or any wss:// proxy."
+              ? "Optional backup address. This machine already connects directly."
+              : "Paste the link from your machine, or type its wss:// address."
           }
           error={urlError}
         >
           <Input
             ref={urlInputRef}
-            placeholder="wss://host.example.org/_buzz-host#token=bha_…"
+            placeholder="wss://host.example.org/_buzz-host"
             value={rawUrl}
             disabled={pending}
             onPaste={handleUrlPaste}
@@ -313,23 +317,34 @@ export function MachineEditorForm({
             onChange={(event) => setName(event.target.value)}
           />
         </Field>
-        <Field
-          label="Access token"
-          optional
-          description="Filled automatically when you paste a #token= pairing link. Leave blank for tailnet-only servers."
-        >
-          <Input
-            type="password"
-            placeholder="bha_…"
-            value={token}
-            disabled={pending}
-            onChange={(event) => {
-              setToken(event.target.value);
-              setSubmitError("");
-              setProbeFailed(false);
-            }}
-          />
-        </Field>
+        {tokenDetected && token.trim() ? (
+          <div className="flex items-center justify-between gap-3">
+            <p className="m-0 text-body-sm text-secondary">
+              Access token detected
+            </p>
+            <Button disabled={pending} onClick={() => setTokenDetected(false)}>
+              Change
+            </Button>
+          </div>
+        ) : (
+          <Field
+            label="Access token"
+            optional
+            description="Only needed if the machine asks for one. Pasting a pairing link fills it in."
+          >
+            <Input
+              type="password"
+              placeholder="Paste access token"
+              value={token}
+              disabled={pending}
+              onChange={(event) => {
+                setToken(event.target.value);
+                setSubmitError("");
+                setProbeFailed(false);
+              }}
+            />
+          </Field>
+        )}
         {submitError && (
           <p role="alert" className="m-0 text-body-sm text-danger">
             {submitError}
@@ -384,7 +399,7 @@ export function MachineEditorDialog({
       description={
         machine && hasIrohRoute(machine) && !primaryWssUrl(machine)
           ? "This machine connects over Iroh. Optionally add a wss:// fallback URL or update its access token."
-          : "Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
+          : "Paste the pairing link from your machine, or type its server address."
       }
       size="compact"
       initialFocus={urlInputRef}
@@ -595,7 +610,7 @@ export function RemoteMachinesManager() {
               hasIrohRoute(view.machine) &&
               !primaryWssUrl(view.machine)
                 ? "This machine connects over Iroh. Optionally add a wss:// fallback URL or update its access token."
-                : "Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
+                : "Paste the pairing link from your machine, or type its server address."
             }
           />
           <MachineEditorForm
