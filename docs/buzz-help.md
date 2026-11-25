@@ -1627,6 +1627,11 @@ If an agent reports incompatible synced settings, choose the **Previous Versions
   (`wss://…#token=…`) fills in the access token. **Run on** in Create agent
   picks one of these machines or this computer; **Harness** then picks from
   the harnesses that run there.
+  A conversation with workspace folders gets a **Files** tab beside its
+  threads; it browses those folders on the machine and previews Markdown,
+  images and text read-only. **Add folder…** and **Worktree location** also
+  offer **Browse remote…** to pick a folder on one of these machines. A host
+  that predates file browsing shows an update notice instead.
   Claude uses your own Claude setup when one already works on this computer,
   such as Amazon Bedrock or Google Vertex AI, configured with the Claude CLI. Buzz never changes that setup or adds its
   key to it. Without one, Claude runs with an Anthropic API key pasted under

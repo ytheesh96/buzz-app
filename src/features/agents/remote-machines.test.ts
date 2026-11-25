@@ -303,6 +303,22 @@ describe("remote-machines", () => {
     });
   });
 
+  it("keeps the fs capability reported by hello", async () => {
+    FakeWebSocket.handler = (ws, msg) => {
+      if (msg.method === "hello")
+        ws.reply(msg.id, {
+          platform: "linux",
+          capabilities: { fs: true },
+        });
+      if (msg.method === "list") ws.reply(msg.id, { agents: [] });
+    };
+    const result = await probeRemoteMachine({
+      url: "wss://fs.example.org/_buzz-host",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    expect(result.capabilities).toEqual({ fs: true });
+  });
+
   it("records offline status when probing fails", async () => {
     FakeWebSocket.handler = (ws, msg) => {
       if (msg.method === "auth") ws.fail(msg.id, "invalid token");

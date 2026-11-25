@@ -7,14 +7,27 @@ import { Input } from "../../shared/design-system/ui/Input";
 import { Textarea } from "../../shared/design-system/ui/Textarea";
 import { Switch } from "../../shared/design-system/ui/Switch";
 import { IconButton } from "../../shared/design-system/ui/IconButton";
+import {
+  MenuItem,
+  MenuPopup,
+  MenuRoot,
+  MenuTrigger,
+} from "../../shared/design-system/ui/Menu";
 import { PreferenceRow } from "../../shared/design-system/ui/PreferenceRow";
 import { SettingsGroup } from "../../shared/design-system/ui/SettingsGroup";
 import {
   FolderPlusIcon,
   FolderSimpleIcon,
+  MonitorIcon,
   XIcon,
 } from "../../shared/design-system/icons";
+import {
+  useRemoteMachines,
+  useRemoteMachineStatuses,
+} from "../agents/remote-machines";
+import { browsableRemoteMachines } from "../agents/remote-fs";
 import type { Workspace } from "./workspace";
+import { RemoteFolderPickerDialog } from "./RemoteFolderPickerDialog";
 import styles from "./WorkspaceSettings.module.css";
 
 const MAX_FOLDERS = 20;
@@ -41,6 +54,14 @@ export function WorkspaceFields({
   const [picking, setPicking] = useState(false);
   const [error, setError] = useState("");
   const [typed, setTyped] = useState("");
+  const [remotePicker, setRemotePicker] = useState<{
+    target: "folder" | "worktree";
+    machineId?: string | undefined;
+    start?: string | undefined;
+  } | null>(null);
+  const machines = useRemoteMachines();
+  const statuses = useRemoteMachineStatuses();
+  const browsable = browsableRemoteMachines(machines, statuses);
   const folderErrorId = useId();
   const current = useRef({ value, onChange, disabled });
   current.current = { value, onChange, disabled };
@@ -129,6 +150,31 @@ export function WorkspaceFields({
       }
     }
   };
+  const openRemote = (target: "folder" | "worktree", machineId?: string) => {
+    setError("");
+    const latest = current.current.value;
+    setRemotePicker({
+      target,
+      ...(machineId ? { machineId } : {}),
+      ...(target === "worktree" && latest.worktree
+        ? { start: latest.worktree.location }
+        : {}),
+    });
+  };
+  const selectRemote = (path: string) => {
+    const picker = remotePicker;
+    if (!picker) return;
+    if (picker.target === "folder") {
+      attach(path);
+      return;
+    }
+    const latest = current.current.value;
+    if (current.current.disabled || !latest.worktree) return;
+    current.current.onChange({
+      ...latest,
+      worktree: { ...latest.worktree, location: path },
+    });
+  };
   const remove = (index: number) => {
     const next = folders.filter((_, item) => item !== index);
     focusAfter.current = next.length ? Math.min(index, next.length - 1) : "add";
@@ -195,7 +241,7 @@ export function WorkspaceFields({
             </div>
           )}
           {isTauri() ? (
-            <div>
+            <div className={styles.folderActions}>
               <Button
                 ref={add}
                 variant="outline"
@@ -208,32 +254,56 @@ export function WorkspaceFields({
                 <FolderPlusIcon size={16} aria-hidden="true" />
                 Add folder…
               </Button>
+              {browsable.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={disabled || full || picking}
+                  onClick={() => openRemote("folder")}
+                >
+                  <MonitorIcon size={16} aria-hidden="true" />
+                  Browse remote…
+                </Button>
+              )}
             </div>
           ) : (
-            <div className={styles.repositoryInput}>
-              <Input
-                ref={pathInput}
-                aria-label="Folder path"
-                value={typed}
-                disabled={disabled || full}
-                placeholder="~/Development/my-project"
-                onChange={(event) => setTyped(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter") return;
-                  event.preventDefault();
-                  if (attach(typed)) setTyped("");
-                }}
-              />
-              <Button
-                ref={add}
-                shape="control"
-                disabled={disabled || full || !typed.trim()}
-                onClick={() => {
-                  if (attach(typed)) setTyped("");
-                }}
-              >
-                Add
-              </Button>
+            <div className={styles.folderActions}>
+              <div className={styles.repositoryInput}>
+                <Input
+                  ref={pathInput}
+                  aria-label="Folder path"
+                  value={typed}
+                  disabled={disabled || full}
+                  placeholder="~/Development/my-project"
+                  onChange={(event) => setTyped(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    if (attach(typed)) setTyped("");
+                  }}
+                />
+                <Button
+                  ref={add}
+                  shape="control"
+                  disabled={disabled || full || !typed.trim()}
+                  onClick={() => {
+                    if (attach(typed)) setTyped("");
+                  }}
+                >
+                  Add
+                </Button>
+              </div>
+              {browsable.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={disabled || full || picking}
+                  onClick={() => openRemote("folder")}
+                >
+                  <MonitorIcon size={16} aria-hidden="true" />
+                  Browse remote…
+                </Button>
+              )}
             </div>
           )}
         </Field>
@@ -254,16 +324,50 @@ export function WorkspaceFields({
           <div className={styles.worktree}>
             {isTauri() ? (
               <Field label="Worktree location" nativeLabel={false}>
-                <FieldButton
-                  ref={location}
-                  dropdown={false}
-                  title={worktree.location}
-                  aria-label={`Worktree location: ${worktree.location}`}
-                  disabled={disabled || picking}
-                  onClick={() => void pickLocation()}
-                >
-                  {worktree.location}
-                </FieldButton>
+                {browsable.length > 0 ? (
+                  <MenuRoot>
+                    <MenuTrigger
+                      render={
+                        <FieldButton
+                          ref={location}
+                          dropdown
+                          title={worktree.location}
+                          aria-label={`Worktree location: ${worktree.location}`}
+                          disabled={disabled || picking}
+                        >
+                          {worktree.location}
+                        </FieldButton>
+                      }
+                    />
+                    <MenuPopup>
+                      <MenuItem
+                        disabled={disabled || picking}
+                        onClick={() => void pickLocation()}
+                      >
+                        This computer
+                      </MenuItem>
+                      {browsable.map((machine) => (
+                        <MenuItem
+                          key={machine.id}
+                          onClick={() => openRemote("worktree", machine.id)}
+                        >
+                          {machine.name}
+                        </MenuItem>
+                      ))}
+                    </MenuPopup>
+                  </MenuRoot>
+                ) : (
+                  <FieldButton
+                    ref={location}
+                    dropdown={false}
+                    title={worktree.location}
+                    aria-label={`Worktree location: ${worktree.location}`}
+                    disabled={disabled || picking}
+                    onClick={() => void pickLocation()}
+                  >
+                    {worktree.location}
+                  </FieldButton>
+                )}
               </Field>
             ) : (
               <Field label="Worktree location">
@@ -277,6 +381,17 @@ export function WorkspaceFields({
                     })
                   }
                 />
+                {browsable.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={disabled || picking}
+                    onClick={() => openRemote("worktree")}
+                  >
+                    <MonitorIcon size={16} aria-hidden="true" />
+                    Browse remote…
+                  </Button>
+                )}
               </Field>
             )}
             <Field label="Base branch">
@@ -294,6 +409,22 @@ export function WorkspaceFields({
           </div>
         )}
       </div>
+      <RemoteFolderPickerDialog
+        open={remotePicker !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemotePicker(null);
+        }}
+        machines={browsable}
+        initialMachineId={remotePicker?.machineId}
+        initialPath={remotePicker?.start}
+        finalFocus={remotePicker?.target === "worktree" ? location : add}
+        title={
+          remotePicker?.target === "worktree"
+            ? "Choose a worktree location"
+            : "Choose a folder"
+        }
+        onSelect={selectRemote}
+      />
     </div>
   );
 }

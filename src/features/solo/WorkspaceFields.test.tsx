@@ -7,13 +7,51 @@ import userEvent from "@testing-library/user-event";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { WorkspaceFields } from "./WorkspaceFields";
 import type { Workspace } from "./workspace";
+import {
+  addRemoteMachine,
+  resetRemoteMachinesCache,
+} from "../agents/remote-machines";
+
+vi.mock("./RemoteFolderPickerDialog", () => ({
+  RemoteFolderPickerDialog: ({
+    open,
+    title,
+    onSelect,
+    onOpenChange,
+  }: {
+    open: boolean;
+    title?: string;
+    onSelect(path: string): void;
+    onOpenChange(open: boolean): void;
+  }) =>
+    open ? (
+      <div role="dialog" aria-label={title}>
+        <button
+          type="button"
+          onClick={() => {
+            onSelect("~/remote/project");
+            onOpenChange(false);
+          }}
+        >
+          Pick remote folder
+        </button>
+      </div>
+    ) : null,
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: vi.fn(),
   invoke: vi.fn(),
 }));
-beforeEach(() => vi.mocked(isTauri).mockReturnValue(true));
+beforeEach(() => {
+  vi.mocked(isTauri).mockReturnValue(true);
+  localStorage.clear();
+  resetRemoteMachinesCache();
+});
 afterEach(() => {
   cleanup();
+  localStorage.clear();
+  resetRemoteMachinesCache();
   vi.resetAllMocks();
 });
 function Form({ folders = ["~/original"] }: { folders?: string[] }) {
@@ -137,4 +175,54 @@ it("keeps the requirement after picker cancellation and preserves picker failure
   await user.click(add);
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.getByRole("button", { name: "Remove chosen" })).toBeVisible();
+});
+
+it("offers remote browsing only when a machine that is not a guest is configured", () => {
+  const { unmount } = render(<Form />);
+  expect(screen.queryByRole("button", { name: "Browse remote…" })).toBeNull();
+  unmount();
+  addRemoteMachine({
+    name: "Studio",
+    url: "wss://studio.example.org/_buzz-host",
+  });
+  render(<Form />);
+  expect(screen.getByRole("button", { name: "Browse remote…" })).toBeVisible();
+});
+
+it("adds a folder selected on a remote machine", async () => {
+  addRemoteMachine({
+    name: "Studio",
+    url: "wss://studio.example.org/_buzz-host",
+  });
+  render(<Form folders={[]} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Browse remote…" }));
+  await user.click(screen.getByRole("button", { name: "Pick remote folder" }));
+  expect(screen.getByRole("button", { name: "Remove project" })).toBeVisible();
+  expect(screen.getByText("~/remote/project")).toBeVisible();
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("offers this computer and the remote machines for the worktree location", async () => {
+  addRemoteMachine({
+    name: "Studio",
+    url: "wss://studio.example.org/_buzz-host",
+  });
+  render(<Form />);
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("button", { name: "Worktree location: ~/worktrees" }),
+  );
+  expect(
+    await screen.findByRole("menuitem", { name: "This computer" }),
+  ).toBeVisible();
+  await user.click(screen.getByRole("menuitem", { name: "Studio" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Pick remote folder" }),
+  );
+  expect(
+    screen.getByRole("button", {
+      name: "Worktree location: ~/remote/project",
+    }),
+  ).toBeVisible();
 });
