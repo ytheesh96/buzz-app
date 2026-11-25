@@ -817,7 +817,7 @@ describe("remote-machines", () => {
     });
   });
 
-  it("matches a manual card on publicGuestUrl and folds a pre-existing discovered duplicate preserving its token", () => {
+  it("matches a manual card on publicGuestUrl and keeps a tokened discovered duplicate as a separate guest card", () => {
     const hostUuid = "11111111-2222-3333-4444-555555555555";
     addRemoteMachine({
       id: "default",
@@ -851,14 +851,77 @@ describe("remote-machines", () => {
       lastSeen: 1_700_000_100_000,
     });
 
-    expect(remoteMachinesSnapshot()).toHaveLength(1);
+    // The guest token is not moved onto the tokenless :8447 admin card, which
+    // would make it authenticate as a guest over Iroh.
     expect(merged).toMatchObject({
       id: "default",
       machineId: hostUuid,
       name: "My Server",
       source: "manual",
       url: "wss://server.example.org:8447",
+      token: "",
+    });
+    const machines = remoteMachinesSnapshot();
+    expect(machines).toHaveLength(2);
+    expect(machines.find((m) => m.id === hostUuid)).toMatchObject({
+      machineId: hostUuid,
+      source: "manual",
+      url: "wss://server.example.org/_buzz-host",
       token: "bha_saved_on_discovered",
+    });
+
+    // Later heartbeats update the card that can use Iroh (it has a token).
+    const next = mergeDiscoveredMachine({
+      machineId: hostUuid,
+      name: "server",
+      publicGuestUrl: "wss://server.example.org/_buzz-host",
+      routes: [
+        { type: "iroh", nodeId: "node-srv", endpointAddr: "eyJpZCI6Im5ldyJ9" },
+        { type: "wss", url: "wss://server.example.org/_buzz-host" },
+      ],
+      agents: [{ pubkey: "bb22" }],
+      lastSeen: 1_700_000_200_000,
+    });
+    expect(next?.id).toBe(hostUuid);
+    expect(next?.routes[0]).toEqual({
+      type: "iroh",
+      nodeId: "node-srv",
+      endpointAddr: "eyJpZCI6Im5ldyJ9",
+    });
+    expect(agentHostMapSnapshot()).toEqual({ bb22: hostUuid });
+    expect(remoteMachinesSnapshot()).toHaveLength(2);
+  });
+
+  it("adopts a discovered duplicate's token when both cards use the same listener", () => {
+    const hostUuid = "66666666-7777-8888-9999-000000000000";
+    addRemoteMachine({
+      id: "default",
+      name: "Guest box",
+      url: "wss://guest.example.org/_buzz-host/",
+      token: "",
+      source: "manual",
+    });
+    addRemoteMachine({
+      id: hostUuid,
+      name: "guest",
+      url: "wss://guest.example.org/_buzz-host",
+      token: "bha_guest",
+      source: "discovered",
+    });
+
+    mergeDiscoveredMachine({
+      machineId: hostUuid,
+      name: "guest",
+      routes: [{ type: "wss", url: "wss://guest.example.org/_buzz-host" }],
+      lastSeen: 1_700_000_300_000,
+    });
+
+    const machines = remoteMachinesSnapshot();
+    expect(machines).toHaveLength(1);
+    expect(machines[0]).toMatchObject({
+      id: "default",
+      machineId: hostUuid,
+      token: "bha_guest",
     });
   });
 });

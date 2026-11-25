@@ -14,6 +14,7 @@ import {
 } from "../features/agents/ProviderDialogActions";
 import {
   addRemoteMachine,
+  canAdoptToken,
   deriveMachineName,
   findDiscoveredMachineMatch,
   formatPlatformLabel,
@@ -164,7 +165,7 @@ export function MachineEditorForm({
         : {}),
       ...(probe ? { lastSeen: Date.now() } : {}),
     };
-    const existingDiscovered = !machine
+    const discoveredMatch = !machine
       ? findDiscoveredMachineMatch({
           ...(probe?.machineId ? { machineId: probe.machineId } : {}),
           url: cleanUrl,
@@ -173,6 +174,18 @@ export function MachineEditorForm({
             : {}),
         })
       : undefined;
+    // Promote the discovered card in place unless that would move its (guest)
+    // token onto a different listener; then it stays a separate card.
+    const existingDiscovered =
+      discoveredMatch &&
+      (cleanToken ||
+        !discoveredMatch.token ||
+        canAdoptToken(
+          { url: cleanUrl, routes: [], token: "" },
+          discoveredMatch,
+        ))
+        ? discoveredMatch
+        : undefined;
     const saved = machine
       ? updateRemoteMachine(machine.id, fields)
       : existingDiscovered

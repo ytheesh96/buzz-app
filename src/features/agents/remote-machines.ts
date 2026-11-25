@@ -736,10 +736,27 @@ function mergeManualRoutes(
 }
 
 /**
+ * buzz-host access tokens are guest tokens. Only move one onto a tokenless card
+ * when both cards use the same WSS listener (or the card has no WSS route);
+ * otherwise a tokenless admin card (e.g. tailnet Serve on `:8447`) would start
+ * authenticating as a guest over Iroh.
+ */
+export function canAdoptToken(
+  card: Pick<RemoteMachine, "url" | "routes" | "token">,
+  donor: Pick<RemoteMachine, "url" | "routes" | "token">,
+): boolean {
+  if (card.token || !donor.token) return false;
+  const cardWss = canonicalWssUrl(primaryWssUrl(card));
+  return !cardWss || cardWss === canonicalWssUrl(primaryWssUrl(donor));
+}
+
+/**
  * Fold any `source: "discovered"` duplicate entries that share `machineId` into
  * the kept card (`keepId`), preserving the kept card's manual identity/URL while
  * absorbing routes, token (when missing), metadata, active selection, and agent
- * host mappings.
+ * host mappings. A duplicate holding a token the kept card can't adopt (see
+ * `canAdoptToken`) is promoted to a separate manual card instead of being
+ * dropped, so the token is neither lost nor moved onto another listener.
  */
 function consolidateDiscoveredDuplicates(
   keepId: string,
@@ -760,8 +777,19 @@ function consolidateDiscoveredDuplicates(
   );
   if (duplicates.length === 0) return kept;
 
-  const duplicateIds = new Set(duplicates.map((m) => m.id));
+  const duplicateIds = new Set<string>();
+  const promoted = new Map<string, RemoteMachine>();
   for (const dup of duplicates) {
+    if (dup.token && dup.token !== kept.token && !canAdoptToken(kept, dup)) {
+      const asManual = normalizeMachine({
+        ...dup,
+        machineId: cleanMachineId,
+        source: "manual",
+      });
+      if (asManual) promoted.set(dup.id, asManual);
+      continue;
+    }
+    duplicateIds.add(dup.id);
     const mergedRoutes =
       kept.source === "manual"
         ? mergeManualRoutes(primaryWssUrl(kept), [
@@ -800,7 +828,7 @@ function consolidateDiscoveredDuplicates(
 
   const nextMachines = machines
     .filter((m) => !duplicateIds.has(m.id))
-    .map((m) => (m.id === keepId ? kept : m));
+    .map((m) => (m.id === keepId ? kept : (promoted.get(m.id) ?? m)));
 
   const store = storage();
   let preferredId: string | undefined;
@@ -904,21 +932,24 @@ export function mergeDiscoveredMachine(
   const incomingCanonical = canonicalWssUrl(incomingWss);
   const incomingGuestCanonical = canonicalWssUrl(input.publicGuestUrl ?? "");
   const machines = readMachinesFromStorage();
-  const findBySource = (source: RemoteMachineSource) => {
+  const matchesBySource = (source: RemoteMachineSource) => {
     const subset = machines.filter((m) => m.source === source);
-    return (
-      subset.find(
-        (m) => m.id === machineId || knownMachineId(m) === machineId,
-      ) ??
-      (incomingCanonical
-        ? subset.find((m) => machineHasCanonicalUrl(m, incomingCanonical))
-        : undefined) ??
-      (incomingGuestCanonical
-        ? subset.find((m) => machineHasCanonicalUrl(m, incomingGuestCanonical))
-        : undefined)
-    );
+    const tiers = [
+      (m: RemoteMachine) =>
+        m.id === machineId || knownMachineId(m) === machineId,
+      (m: RemoteMachine) => machineHasCanonicalUrl(m, incomingCanonical),
+      (m: RemoteMachine) => machineHasCanonicalUrl(m, incomingGuestCanonical),
+    ];
+    return tiers.flatMap((matches) => subset.filter(matches));
   };
-  const existing = findBySource("manual") ?? findBySource("discovered");
+  // Several manual cards can point at one host (e.g. a tokenless admin card and
+  // a guest card). Heartbeats carry Iroh routes, which only work with an access
+  // token, so prefer a manual card that has one.
+  const manualMatches = matchesBySource("manual");
+  const existing =
+    manualMatches.find((m) => m.token) ??
+    manualMatches[0] ??
+    matchesBySource("discovered")[0];
   const lastSeen = input.lastSeen ?? Date.now();
 
   if (!existing) {

@@ -18,6 +18,7 @@ import {
 
 class StubWebSocket {
   static mode: "ok" | "fail" = "ok";
+  static helloExtra: Record<string, unknown> = {};
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -50,6 +51,7 @@ class StubWebSocket {
             platform: "darwin",
             role: "admin",
             capabilities: { desktop: false },
+            ...StubWebSocket.helloExtra,
           },
         }),
       });
@@ -74,6 +76,7 @@ beforeEach(() => {
   localStorage.clear();
   resetRemoteMachinesCache();
   StubWebSocket.mode = "ok";
+  StubWebSocket.helloExtra = {};
   vi.stubGlobal("WebSocket", StubWebSocket);
 });
 
@@ -332,4 +335,39 @@ it("promotes a matching discovered card in place instead of creating a duplicate
     },
     { type: "wss", url: "wss://mac-mini.example.org/_buzz-host" },
   ]);
+});
+
+it("keeps a tokened discovered card separate when adding a tokenless admin URL for the same host", async () => {
+  const hostUuid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+  StubWebSocket.helloExtra = { machineId: hostUuid };
+  addRemoteMachine({
+    id: hostUuid,
+    name: "mac-mini",
+    source: "discovered",
+    url: "wss://mac-mini.example.org/_buzz-host",
+    token: "bha_guest",
+  });
+
+  const user = userEvent.setup();
+  renderManager();
+
+  await user.click(screen.getByRole("button", { name: "Add machine" }));
+  await user.paste("wss://mac-mini.example.org:8447");
+  await user.click(screen.getByRole("button", { name: "Connect and save" }));
+
+  await waitFor(() =>
+    expect(
+      remoteMachinesSnapshot().find((m) => m.id === hostUuid)?.source,
+    ).toBe("manual"),
+  );
+  const machines = remoteMachinesSnapshot();
+  expect(machines).toHaveLength(2);
+  expect(machines.find((m) => m.id !== hostUuid)).toMatchObject({
+    url: "wss://mac-mini.example.org:8447",
+    token: "",
+  });
+  expect(machines.find((m) => m.id === hostUuid)).toMatchObject({
+    url: "wss://mac-mini.example.org/_buzz-host",
+    token: "bha_guest",
+  });
 });
