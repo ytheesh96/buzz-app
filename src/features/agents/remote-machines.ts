@@ -28,6 +28,8 @@ export type RemoteMachineCapabilities = Readonly<{
 
 export type RemoteMachine = Readonly<{
   id: string;
+  /** Stable host UUID reported by `hello.machineId` and Nostr discovery. */
+  machineId?: string;
   name: string;
   /** Primary wss:// URL (mirrors the first `wss` route, or empty for iroh-only machines). */
   url: string;
@@ -53,6 +55,7 @@ export type RemoteMachineStatus = Readonly<{
 }>;
 
 export type RemoteMachineProbeResult = Readonly<{
+  machineId?: string;
   platform?: string;
   host?: string;
   role?: "admin" | "guest";
@@ -260,6 +263,10 @@ function normalizeMachine(raw: unknown): RemoteMachine | null {
   const token = typeof item.token === "string" ? item.token.trim() : "";
   const source: RemoteMachineSource =
     item.source === "discovered" ? "discovered" : "manual";
+  const machineId =
+    typeof item.machineId === "string" && item.machineId.trim()
+      ? item.machineId.trim()
+      : undefined;
   const platform =
     typeof item.platform === "string" && item.platform.trim()
       ? item.platform.trim()
@@ -284,6 +291,7 @@ function normalizeMachine(raw: unknown): RemoteMachine | null {
       : undefined;
   return Object.freeze({
     id,
+    ...(machineId ? { machineId } : {}),
     name,
     url,
     token,
@@ -588,6 +596,7 @@ function generateMachineId(existing: readonly RemoteMachine[]): string {
 
 export function addRemoteMachine(input: {
   id?: string;
+  machineId?: string;
   name?: string;
   url?: string;
   token?: string;
@@ -610,6 +619,7 @@ export function addRemoteMachine(input: {
       : [];
   const machine = normalizeMachine({
     id: input.id?.trim() || generateMachineId(existing),
+    machineId: input.machineId,
     name: input.name?.trim() || (cleanUrl ? deriveMachineName(cleanUrl) : ""),
     url: cleanUrl,
     token: input.token?.trim() ?? "",
@@ -684,12 +694,232 @@ function canonicalWssUrl(url: string): string {
   }
 }
 
+function knownMachineId(machine: RemoteMachine): string | undefined {
+  return (
+    machine.machineId ??
+    (machine.source === "discovered" ? machine.id : undefined)
+  );
+}
+
+function machineHasCanonicalUrl(
+  machine: RemoteMachine,
+  canonicalUrl: string,
+): boolean {
+  if (!canonicalUrl) return false;
+  if (canonicalWssUrl(primaryWssUrl(machine)) === canonicalUrl) return true;
+  if (
+    machine.publicGuestUrl &&
+    canonicalWssUrl(machine.publicGuestUrl) === canonicalUrl
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function mergeManualRoutes(
+  existingWss: string,
+  incomingRoutes: readonly RemoteMachineRoute[],
+): { url: string; routes: readonly RemoteMachineRoute[] } {
+  const incomingWss =
+    incomingRoutes.find((route) => route.type === "wss")?.url ?? "";
+  if (!existingWss) {
+    return { url: incomingWss, routes: incomingRoutes };
+  }
+  const incomingNonWss = incomingRoutes.filter((route) => route.type !== "wss");
+  return {
+    url: existingWss,
+    routes: normalizeRoutes(
+      [...incomingNonWss, { type: "wss" as const, url: existingWss }],
+      existingWss,
+    ),
+  };
+}
+
+/**
+ * buzz-host access tokens are guest tokens. Only move one onto a tokenless card
+ * when both cards use the same WSS listener (or the card has no WSS route);
+ * otherwise a tokenless admin card (e.g. tailnet Serve on `:8447`) would start
+ * authenticating as a guest over Iroh.
+ */
+export function canAdoptToken(
+  card: Pick<RemoteMachine, "url" | "routes" | "token">,
+  donor: Pick<RemoteMachine, "url" | "routes" | "token">,
+): boolean {
+  if (card.token || !donor.token) return false;
+  const cardWss = canonicalWssUrl(primaryWssUrl(card));
+  return !cardWss || cardWss === canonicalWssUrl(primaryWssUrl(donor));
+}
+
+/**
+ * Fold any `source: "discovered"` duplicate entries that share `machineId` into
+ * the kept card (`keepId`), preserving the kept card's manual identity/URL while
+ * absorbing routes, token (when missing), metadata, active selection, and agent
+ * host mappings. A duplicate holding a token the kept card can't adopt (see
+ * `canAdoptToken`) is promoted to a separate manual card instead of being
+ * dropped, so the token is neither lost nor moved onto another listener.
+ */
+function consolidateDiscoveredDuplicates(
+  keepId: string,
+  machineId: string,
+): RemoteMachine | undefined {
+  const cleanMachineId = machineId.trim();
+  const machines = readMachinesFromStorage();
+  const keepIndex = machines.findIndex((m) => m.id === keepId);
+  if (keepIndex < 0) return undefined;
+  let kept = machines[keepIndex];
+  if (!kept || !cleanMachineId) return kept;
+
+  const duplicates = machines.filter(
+    (m) =>
+      m.id !== keepId &&
+      m.source === "discovered" &&
+      knownMachineId(m) === cleanMachineId,
+  );
+  if (duplicates.length === 0) return kept;
+
+  const duplicateIds = new Set<string>();
+  const promoted = new Map<string, RemoteMachine>();
+  for (const dup of duplicates) {
+    if (dup.token && dup.token !== kept.token && !canAdoptToken(kept, dup)) {
+      const asManual = normalizeMachine({
+        ...dup,
+        machineId: cleanMachineId,
+        source: "manual",
+      });
+      if (asManual) promoted.set(dup.id, asManual);
+      continue;
+    }
+    duplicateIds.add(dup.id);
+    const mergedRoutes =
+      kept.source === "manual"
+        ? mergeManualRoutes(primaryWssUrl(kept), [
+            ...dup.routes.filter((r) => r.type !== "wss"),
+            ...kept.routes,
+          ])
+        : {
+            url: primaryWssUrl(kept) || primaryWssUrl(dup),
+            routes: normalizeRoutes(
+              [...kept.routes, ...dup.routes],
+              primaryWssUrl(kept) || primaryWssUrl(dup),
+            ),
+          };
+    const nextLastSeen =
+      kept.lastSeen !== undefined && dup.lastSeen !== undefined
+        ? Math.max(kept.lastSeen, dup.lastSeen)
+        : (kept.lastSeen ?? dup.lastSeen);
+    const merged = normalizeMachine({
+      ...kept,
+      machineId: cleanMachineId,
+      url: mergedRoutes.url,
+      routes: mergedRoutes.routes,
+      token: kept.token || dup.token,
+      platform: kept.platform ?? dup.platform,
+      host: kept.host ?? dup.host,
+      runtimes: kept.runtimes ?? dup.runtimes,
+      capabilities: kept.capabilities ?? dup.capabilities,
+      publicGuestUrl:
+        kept.publicGuestUrl !== undefined
+          ? kept.publicGuestUrl
+          : dup.publicGuestUrl,
+      ...(nextLastSeen !== undefined ? { lastSeen: nextLastSeen } : {}),
+    });
+    if (merged) kept = merged;
+  }
+
+  const nextMachines = machines
+    .filter((m) => !duplicateIds.has(m.id))
+    .map((m) => (m.id === keepId ? kept : (promoted.get(m.id) ?? m)));
+
+  const store = storage();
+  let preferredId: string | undefined;
+  if (store) {
+    try {
+      const currentActive = store.getItem(ACTIVE_MACHINE_KEY)?.trim();
+      if (currentActive && duplicateIds.has(currentActive)) {
+        store.setItem(ACTIVE_MACHINE_KEY, keepId);
+        preferredId = keepId;
+      }
+    } catch {
+      // Ignore storage errors.
+    }
+  }
+  writeMachinesToStorage(nextMachines, preferredId);
+
+  const hosts = readAgentHostsFromStorage();
+  let hostsChanged = false;
+  const nextHosts: Record<string, string> = {};
+  for (const [pubkey, hostMachineId] of Object.entries(hosts)) {
+    if (duplicateIds.has(hostMachineId)) {
+      nextHosts[pubkey] = keepId;
+      hostsChanged = true;
+    } else {
+      nextHosts[pubkey] = hostMachineId;
+    }
+  }
+  if (hostsChanged) writeAgentHostsToStorage(nextHosts);
+
+  let statusChanged = false;
+  const nextStatuses = { ...statusMap };
+  for (const dupId of duplicateIds) {
+    statusOriginMap.delete(dupId);
+    probeCheckedAtMap.delete(dupId);
+    if (dupId in nextStatuses) {
+      delete nextStatuses[dupId];
+      statusChanged = true;
+    }
+    void irohTunnelDisconnect(dupId);
+  }
+  if (statusChanged) {
+    statusMap = Object.freeze(nextStatuses);
+    emitStatuses();
+  }
+
+  return kept;
+}
+
+/**
+ * Find an existing `source: "discovered"` card that corresponds to a manually
+ * added machine (by `machineId`, primary WSS URL, or `publicGuestUrl`) so the
+ * editor can promote it in place instead of creating a duplicate card.
+ */
+export function findDiscoveredMachineMatch(input: {
+  machineId?: string;
+  url?: string;
+  publicGuestUrl?: string | null;
+}): RemoteMachine | undefined {
+  const machines = readMachinesFromStorage().filter(
+    (m) => m.source === "discovered",
+  );
+  const cleanId = input.machineId?.trim() ?? "";
+  if (cleanId) {
+    const byId = machines.find(
+      (m) => m.id === cleanId || knownMachineId(m) === cleanId,
+    );
+    if (byId) return byId;
+  }
+  const urlCanonical = canonicalWssUrl(input.url ?? "");
+  if (urlCanonical) {
+    const byUrl = machines.find((m) => machineHasCanonicalUrl(m, urlCanonical));
+    if (byUrl) return byUrl;
+  }
+  const guestCanonical = canonicalWssUrl(input.publicGuestUrl ?? "");
+  if (guestCanonical) {
+    const byGuest = machines.find((m) =>
+      machineHasCanonicalUrl(m, guestCanonical),
+    );
+    if (byGuest) return byGuest;
+  }
+  return undefined;
+}
+
 /**
  * Merge a discovered machine record (from Nostr kind:30003 presence) into the
- * registry. Matches by `machineId` or primary `wss` URL, never clobbers a
- * user-configured `token` or manual `name`, keeps `source: "manual"` on
- * manually configured machines, creates brand-new machines with
- * `source: "discovered"` and `id: machineId`, and merges advertised `agents`.
+ * registry. Matches by `machineId`, primary `wss` URL, or `publicGuestUrl`
+ * (preferring manual cards over discovered duplicates), never clobbers a
+ * user-configured `token`, manual `name`, or manual `wss` URL, keeps
+ * `source: "manual"` on manually configured machines, creates brand-new
+ * machines with `source: "discovered"` and `id: machineId`, and merges
+ * advertised `agents`.
  */
 export function mergeDiscoveredMachine(
   input: DiscoveredMachineInput,
@@ -700,20 +930,33 @@ export function mergeDiscoveredMachine(
   const incomingWss =
     incomingRoutes.find((route) => route.type === "wss")?.url ?? "";
   const incomingCanonical = canonicalWssUrl(incomingWss);
+  const incomingGuestCanonical = canonicalWssUrl(input.publicGuestUrl ?? "");
   const machines = readMachinesFromStorage();
+  const matchesBySource = (source: RemoteMachineSource) => {
+    const subset = machines.filter((m) => m.source === source);
+    const tiers = [
+      (m: RemoteMachine) =>
+        m.id === machineId || knownMachineId(m) === machineId,
+      (m: RemoteMachine) => machineHasCanonicalUrl(m, incomingCanonical),
+      (m: RemoteMachine) => machineHasCanonicalUrl(m, incomingGuestCanonical),
+    ];
+    return tiers.flatMap((matches) => subset.filter(matches));
+  };
+  // Several manual cards can point at one host (e.g. a tokenless admin card and
+  // a guest card). Heartbeats carry Iroh routes, which only work with an access
+  // token, so prefer a manual card that has one.
+  const manualMatches = matchesBySource("manual");
   const existing =
-    machines.find((m) => m.id === machineId) ??
-    (incomingCanonical
-      ? machines.find(
-          (m) => canonicalWssUrl(primaryWssUrl(m)) === incomingCanonical,
-        )
-      : undefined);
+    manualMatches.find((m) => m.token) ??
+    manualMatches[0] ??
+    matchesBySource("discovered")[0];
   const lastSeen = input.lastSeen ?? Date.now();
 
   if (!existing) {
     if (incomingRoutes.length === 0) return undefined;
     const created = addRemoteMachine({
       id: machineId,
+      machineId,
       name: input.name,
       url: incomingWss,
       routes: incomingRoutes,
@@ -742,22 +985,20 @@ export function mergeDiscoveredMachine(
   let nextUrl = existing.url;
   if (incomingRoutes.length > 0) {
     if (existing.source === "manual") {
-      const existingWss = primaryWssUrl(existing);
-      nextUrl = incomingWss || existingWss;
-      nextRoutes =
-        incomingWss || !existingWss
-          ? incomingRoutes
-          : normalizeRoutes(
-              [...incomingRoutes, { type: "wss" as const, url: existingWss }],
-              existingWss,
-            );
+      const mergedManual = mergeManualRoutes(
+        primaryWssUrl(existing),
+        incomingRoutes,
+      );
+      nextUrl = mergedManual.url;
+      nextRoutes = mergedManual.routes;
     } else {
       nextUrl = incomingWss;
       nextRoutes = incomingRoutes;
     }
   }
 
-  const updated = updateRemoteMachine(existing.id, {
+  let updated = updateRemoteMachine(existing.id, {
+    machineId,
     ...(existing.source === "discovered" && input.name.trim()
       ? { name: input.name.trim() }
       : {}),
@@ -774,6 +1015,9 @@ export function mergeDiscoveredMachine(
       : {}),
     lastSeen,
   });
+  if (updated) {
+    updated = consolidateDiscoveredDuplicates(updated.id, machineId) ?? updated;
+  }
   if (updated && input.agents !== undefined) {
     mergeAgentMachines(
       updated.id,
@@ -1237,6 +1481,10 @@ export async function probeRemoteMachine({
                 ...(typeof a.name === "string" ? { name: a.name } : {}),
               }),
             );
+          const machineId =
+            typeof hello.machineId === "string" && hello.machineId.trim()
+              ? hello.machineId.trim()
+              : undefined;
           const platform =
             typeof hello.platform === "string" ? hello.platform : undefined;
           const capabilities =
@@ -1251,6 +1499,7 @@ export async function probeRemoteMachine({
               : undefined;
           succeed(
             Object.freeze({
+              ...(machineId ? { machineId } : {}),
               ...(platform ? { platform } : {}),
               ...(typeof hello.host === "string" ? { host: hello.host } : {}),
               ...(role ? { role } : {}),
@@ -1298,7 +1547,13 @@ export async function refreshRemoteMachine(
     ...statusMap[id],
     state: "checking",
   });
-  const candidates = await resolveMachineWebSocketCandidates(machine);
+  // buzz-host-iroh forwards to the token-gated listener, so skip Iroh when a
+  // tokenless machine (e.g. tailnet-only Serve) already has a WSS route.
+  const hasWss = Boolean(primaryWssUrl(machine));
+  const candidates = await resolveMachineWebSocketCandidates(
+    machine,
+    !machine.token && hasWss ? { irohAvailable: false } : undefined,
+  );
   if (options?.signal?.aborted) return undefined;
   if (!candidates.length) {
     const now = Date.now();
@@ -1327,6 +1582,7 @@ export async function refreshRemoteMachine(
       lastError = error;
     }
   }
+  if (!readMachinesFromStorage().some((m) => m.id === id)) return undefined;
   const now = Date.now();
   statusOriginMap.set(id, "probe");
   probeCheckedAtMap.set(id, now);
@@ -1344,7 +1600,8 @@ function recordProbe(
   activeRoute: MachineRouteType,
 ) {
   const now = Date.now();
-  updateRemoteMachine(id, {
+  const updated = updateRemoteMachine(id, {
+    ...(result.machineId ? { machineId: result.machineId } : {}),
     ...(result.platform ? { platform: result.platform } : {}),
     ...(result.host ? { host: result.host } : {}),
     ...(result.role ? { role: result.role } : {}),
@@ -1355,6 +1612,10 @@ function recordProbe(
       : {}),
     lastSeen: now,
   });
+  if (!updated) return;
+  if (result.machineId) {
+    consolidateDiscoveredDuplicates(id, result.machineId);
+  }
   mergeAgentMachines(
     id,
     result.agents.map((a) => a.pubkey),

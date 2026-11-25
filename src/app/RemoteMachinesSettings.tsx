@@ -14,7 +14,9 @@ import {
 } from "../features/agents/ProviderDialogActions";
 import {
   addRemoteMachine,
+  canAdoptToken,
   deriveMachineName,
+  findDiscoveredMachineMatch,
   formatPlatformLabel,
   parseMachineInput,
   primaryWssUrl,
@@ -152,6 +154,7 @@ export function MachineEditorForm({
       name: cleanName,
       url: cleanUrl,
       token: cleanToken,
+      ...(probe?.machineId ? { machineId: probe.machineId } : {}),
       ...(probe?.platform ? { platform: probe.platform } : {}),
       ...(probe?.host ? { host: probe.host } : {}),
       ...(probe?.role ? { role: probe.role } : {}),
@@ -162,9 +165,36 @@ export function MachineEditorForm({
         : {}),
       ...(probe ? { lastSeen: Date.now() } : {}),
     };
+    const discoveredMatch = !machine
+      ? findDiscoveredMachineMatch({
+          ...(probe?.machineId ? { machineId: probe.machineId } : {}),
+          url: cleanUrl,
+          ...(probe?.publicGuestUrl !== undefined
+            ? { publicGuestUrl: probe.publicGuestUrl }
+            : {}),
+        })
+      : undefined;
+    // Promote the discovered card in place unless that would move its (guest)
+    // token onto a different listener; then it stays a separate card.
+    const existingDiscovered =
+      discoveredMatch &&
+      (cleanToken ||
+        !discoveredMatch.token ||
+        canAdoptToken(
+          { url: cleanUrl, routes: [], token: "" },
+          discoveredMatch,
+        ))
+        ? discoveredMatch
+        : undefined;
     const saved = machine
       ? updateRemoteMachine(machine.id, fields)
-      : addRemoteMachine(fields);
+      : existingDiscovered
+        ? updateRemoteMachine(existingDiscovered.id, {
+            ...fields,
+            token: cleanToken || existingDiscovered.token,
+            source: "manual",
+          })
+        : addRemoteMachine(fields);
     setPending(false);
     if (!saved) {
       onCancel();
