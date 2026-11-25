@@ -289,3 +289,47 @@ it("shows the active WSS badge for a wss-backed machine when online", async () =
   expect(screen.getByText("WSS")).toBeVisible();
   expect(screen.queryByText("Discovered")).toBeNull();
 });
+
+it("promotes a matching discovered card in place instead of creating a duplicate when adding manually", async () => {
+  const hostUuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  addRemoteMachine({
+    id: hostUuid,
+    name: "mac-mini",
+    source: "discovered",
+    platform: "darwin",
+    routes: [
+      {
+        type: "iroh",
+        nodeId: "node-mac-1234",
+        endpointAddr: "eyJpZCI6Im1hYyJ9",
+      },
+      { type: "wss", url: "wss://mac-mini.example.org/_buzz-host" },
+    ],
+  });
+
+  const user = userEvent.setup();
+  renderManager();
+
+  await user.click(screen.getByRole("button", { name: "Add machine" }));
+  await user.paste("wss://mac-mini.example.org/_buzz-host#token=bha_secret123");
+  await user.click(screen.getByRole("button", { name: "Connect and save" }));
+
+  expect(await screen.findByText("Mac Mini")).toBeVisible();
+  const machines = remoteMachinesSnapshot();
+  expect(machines).toHaveLength(1);
+  expect(machines[0]).toMatchObject({
+    id: hostUuid,
+    name: "Mac Mini",
+    source: "manual",
+    url: "wss://mac-mini.example.org/_buzz-host",
+    token: "bha_secret123",
+  });
+  expect(machines[0]?.routes).toEqual([
+    {
+      type: "iroh",
+      nodeId: "node-mac-1234",
+      endpointAddr: "eyJpZCI6Im1hYyJ9",
+    },
+    { type: "wss", url: "wss://mac-mini.example.org/_buzz-host" },
+  ]);
+});

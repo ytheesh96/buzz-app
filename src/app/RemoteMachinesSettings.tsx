@@ -15,6 +15,7 @@ import {
 import {
   addRemoteMachine,
   deriveMachineName,
+  findDiscoveredMachineMatch,
   formatPlatformLabel,
   parseMachineInput,
   primaryWssUrl,
@@ -152,6 +153,7 @@ export function MachineEditorForm({
       name: cleanName,
       url: cleanUrl,
       token: cleanToken,
+      ...(probe?.machineId ? { machineId: probe.machineId } : {}),
       ...(probe?.platform ? { platform: probe.platform } : {}),
       ...(probe?.host ? { host: probe.host } : {}),
       ...(probe?.role ? { role: probe.role } : {}),
@@ -162,9 +164,24 @@ export function MachineEditorForm({
         : {}),
       ...(probe ? { lastSeen: Date.now() } : {}),
     };
+    const existingDiscovered = !machine
+      ? findDiscoveredMachineMatch({
+          ...(probe?.machineId ? { machineId: probe.machineId } : {}),
+          url: cleanUrl,
+          ...(probe?.publicGuestUrl !== undefined
+            ? { publicGuestUrl: probe.publicGuestUrl }
+            : {}),
+        })
+      : undefined;
     const saved = machine
       ? updateRemoteMachine(machine.id, fields)
-      : addRemoteMachine(fields);
+      : existingDiscovered
+        ? updateRemoteMachine(existingDiscovered.id, {
+            ...fields,
+            token: cleanToken || existingDiscovered.token,
+            source: "manual",
+          })
+        : addRemoteMachine(fields);
     setPending(false);
     if (!saved) {
       onCancel();
