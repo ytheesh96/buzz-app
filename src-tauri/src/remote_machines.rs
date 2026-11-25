@@ -131,9 +131,10 @@ fn wss_ok(url: &str) -> bool {
 fn machine_id_ok(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
+        && !id.contains("..")
         && id
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 /// NIP-OA: `owner` signed sha256("nostr:agent-auth:<agent>:") with BIP-340.
@@ -160,7 +161,10 @@ fn authenticate(raw: &serde_json::Value, viewer: &str) -> Option<Candidate> {
         return None;
     }
     let pubkey = event.pubkey.to_hex();
-    let named = |name: &'static str| tags.iter().filter(move |tag| tag.first().map(String::as_str) == Some(name));
+    let named = |name: &'static str| {
+        tags.iter()
+            .filter(move |tag| tag.first().map(String::as_str) == Some(name))
+    };
     let [d] = named("d").collect::<Vec<_>>()[..] else {
         return None;
     };
@@ -219,10 +223,13 @@ fn parse_payload(plaintext: &str, machine_id: &str) -> Option<StatusPayload> {
             }
         })
         && payload.agents.len() <= MAX_AGENTS
-        && payload
-            .agents
-            .iter()
-            .all(|agent| lower_hex(&agent.pubkey, 64) && optional_text(&agent.name))
+        && payload.agents.iter().all(|agent| {
+            lower_hex(&agent.pubkey, 64)
+                && agent
+                    .name
+                    .as_deref()
+                    .is_none_or(|name| name.is_empty() || text_ok(name))
+        })
         && payload.public_guest_url.as_deref().is_none_or(wss_ok);
     valid.then_some(payload)
 }
@@ -431,7 +438,14 @@ mod tests {
         let mut twice = tags("m-1");
         twice.push(auth(VIEWER, &viewer, &machine));
         let twice = status_event(&twice, &payload("m-1", "online"));
-        let events = vec![missing, wrong_owner, forged, other_agent, conditioned, twice];
+        let events = vec![
+            missing,
+            wrong_owner,
+            forged,
+            other_agent,
+            conditioned,
+            twice,
+        ];
         assert!(verify(events).await.is_empty());
     }
 
@@ -457,9 +471,19 @@ mod tests {
             MACHINE,
             30078,
             &tags("m-1"),
-            &encrypt(MACHINE, &hex_of(VIEWER), &payload("m-1", "online").to_string()),
+            &encrypt(
+                MACHINE,
+                &hex_of(VIEWER),
+                &payload("m-1", "online").to_string(),
+            ),
         );
-        let events = vec![mismatched, unprefixed, no_topic, other_recipient, wrong_kind];
+        let events = vec![
+            mismatched,
+            unprefixed,
+            no_topic,
+            other_recipient,
+            wrong_kind,
+        ];
         assert!(verify(events).await.is_empty());
     }
 
@@ -514,10 +538,7 @@ mod tests {
             .decrypt_from_peer(&hex_of(STRANGER), &sealed)
             .await
             .is_err());
-        assert!(host
-            .decrypt_from_peer("not-a-key", &sealed)
-            .await
-            .is_err());
+        assert!(host.decrypt_from_peer("not-a-key", &sealed).await.is_err());
         let oversized = "A".repeat(64 * 1024 + 1);
         assert!(host
             .decrypt_from_peer(&hex_of(MACHINE), &oversized)

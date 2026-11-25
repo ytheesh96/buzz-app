@@ -7,6 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { resolveMachineWebSocketCandidates } from "../features/agents/iroh-tunnel";
+import {
+  ProviderDialogActions,
+  ProviderDialogFooter,
+} from "../features/agents/ProviderDialogActions";
 import {
   addRemoteMachine,
   deriveMachineName,
@@ -14,12 +19,13 @@ import {
   parseMachineInput,
   primaryWssUrl,
   probeRemoteMachine,
+  type RemoteMachine,
+  type RemoteMachineStatus,
   refreshRemoteMachine,
   removeRemoteMachine,
   updateRemoteMachine,
-  useRemoteMachines,
   useRemoteMachineStatuses,
-  type RemoteMachine,
+  useRemoteMachines,
 } from "../features/agents/remote-machines";
 import {
   ArrowsClockwiseIcon,
@@ -37,12 +43,12 @@ import { Field } from "../shared/design-system/ui/Field";
 import { InlineHeader } from "../shared/design-system/ui/Header";
 import { IconButton } from "../shared/design-system/ui/IconButton";
 import { Input } from "../shared/design-system/ui/Input";
-import {
-  ProviderDialogActions,
-  ProviderDialogFooter,
-} from "../features/agents/ProviderDialogActions";
 import { PreferenceRow } from "../shared/design-system/ui/PreferenceRow";
 import { SettingsGroup } from "../shared/design-system/ui/SettingsGroup";
+
+function hasIrohRoute(machine: RemoteMachine | undefined): boolean {
+  return Boolean(machine?.routes.some((route) => route.type === "iroh"));
+}
 
 function hostLabel(machine: RemoteMachine): string {
   if (machine.host) return machine.host;
@@ -55,7 +61,21 @@ function hostLabel(machine: RemoteMachine): string {
     }
   }
   const iroh = machine.routes.find((route) => route.type === "iroh");
-  return iroh ? `Iroh ${iroh.nodeId.slice(0, 12)}…` : "";
+  if (!iroh) return "";
+  return iroh.nodeId.length > 12 ? `${iroh.nodeId.slice(0, 12)}…` : iroh.nodeId;
+}
+
+function routeBadgesFor(
+  machine: RemoteMachine,
+  status: RemoteMachineStatus | undefined,
+): readonly ("Iroh" | "WSS")[] {
+  if (status?.state === "online" && status.activeRoute) {
+    return [status.activeRoute === "iroh" ? "Iroh" : "WSS"];
+  }
+  const badges: ("Iroh" | "WSS")[] = [];
+  if (hasIrohRoute(machine)) badges.push("Iroh");
+  if (primaryWssUrl(machine)) badges.push("WSS");
+  return badges;
 }
 
 /** The add/edit machine fields and actions. Actions render into the
@@ -74,6 +94,7 @@ export function MachineEditorForm({
   onPendingChange?: ((pending: boolean) => void) | undefined;
 }) {
   const editing = Boolean(machine);
+  const irohOnlyCapable = hasIrohRoute(machine);
   const [rawUrl, setRawUrl] = useState(machine ? primaryWssUrl(machine) : "");
   const [name, setName] = useState(machine?.name ?? "");
   const [token, setToken] = useState(machine?.token ?? "");
@@ -116,14 +137,17 @@ export function MachineEditorForm({
   const derivedName =
     !parsedPreview.error && parsedPreview.url
       ? deriveMachineName(parsedPreview.url)
-      : "";
+      : (machine?.name ?? "");
 
   const persist = (
     cleanUrl: string,
     cleanToken: string,
     probe?: Awaited<ReturnType<typeof probeRemoteMachine>>,
   ) => {
-    const cleanName = name.trim() || deriveMachineName(cleanUrl);
+    const cleanName =
+      name.trim() ||
+      (cleanUrl ? deriveMachineName(cleanUrl) : machine?.name) ||
+      "Remote machine";
     const fields = {
       name: cleanName,
       url: cleanUrl,
@@ -152,14 +176,19 @@ export function MachineEditorForm({
 
   const save = async ({ skipCheck = false }: { skipCheck?: boolean } = {}) => {
     if (pending) return;
-    const parsed = parseMachineInput(rawUrl);
-    if (parsed.error) {
-      setUrlError(parsed.error);
-      urlInputRef.current?.focus();
-      return;
+    const trimmedUrl = rawUrl.trim();
+    let cleanUrl = "";
+    let cleanToken = token.trim();
+    if (trimmedUrl || !irohOnlyCapable) {
+      const parsed = parseMachineInput(rawUrl);
+      if (parsed.error) {
+        setUrlError(parsed.error);
+        urlInputRef.current?.focus();
+        return;
+      }
+      cleanUrl = parsed.url;
+      cleanToken = (parsed.token ?? token).trim();
     }
-    const cleanUrl = parsed.url;
-    const cleanToken = (parsed.token ?? token).trim();
     if (skipCheck) {
       persist(cleanUrl, cleanToken);
       return;
@@ -170,11 +199,35 @@ export function MachineEditorForm({
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const probe = await probeRemoteMachine({
-        url: cleanUrl,
-        token: cleanToken,
-        signal: controller.signal,
-      });
+      let probe: Awaited<ReturnType<typeof probeRemoteMachine>>;
+      if (cleanUrl) {
+        probe = await probeRemoteMachine({
+          url: cleanUrl,
+          token: cleanToken,
+          signal: controller.signal,
+        });
+      } else if (machine) {
+        const candidates = await resolveMachineWebSocketCandidates({
+          id: machine.id,
+          url: "",
+          routes: machine.routes,
+        });
+        if (controller.signal.aborted) return;
+        const candidate = candidates[0];
+        if (!candidate) {
+          throw new Error(
+            "Iroh tunnel is unavailable in this environment. Add a wss:// fallback URL or click Save anyway.",
+          );
+        }
+        probe = await probeRemoteMachine({
+          url: candidate.url,
+          token: cleanToken,
+          allowLoopbackTunnel: candidate.routeType === "iroh",
+          signal: controller.signal,
+        });
+      } else {
+        throw new Error("Enter a server URL.");
+      }
       if (controller.signal.aborted) return;
       persist(cleanUrl, cleanToken, probe);
     } catch (error) {
@@ -197,7 +250,12 @@ export function MachineEditorForm({
       >
         <Field
           label="Server URL or pairing link"
-          description="Works over Tailscale Funnel, zrok, or any wss:// proxy."
+          optional={irohOnlyCapable}
+          description={
+            irohOnlyCapable
+              ? "Optional fallback over Tailscale Funnel, zrok, or any wss:// proxy. This machine already has an Iroh route."
+              : "Works over Tailscale Funnel, zrok, or any wss:// proxy."
+          }
           error={urlError}
         >
           <Input
@@ -293,7 +351,11 @@ export function MachineEditorDialog({
         if (!next) onClose();
       }}
       title={machine ? `Edit ${machine.name}` : "Add machine"}
-      description="Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
+      description={
+        machine && hasIrohRoute(machine) && !primaryWssUrl(machine)
+          ? "This machine connects over Iroh. Optionally add a wss:// fallback URL or update its access token."
+          : "Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
+      }
       size="compact"
       initialFocus={urlInputRef}
       preventClose={pending}
@@ -363,9 +425,6 @@ export function RemoteMachinesManager() {
     const parts: string[] = [];
     const host = hostLabel(machine);
     if (host) parts.push(host);
-    if (machine.routes.some((route) => route.type === "iroh")) {
-      parts.push("Iroh");
-    }
     if (status?.state === "checking") {
       parts.push("Checking…");
     } else if (status?.state === "online") {
@@ -420,6 +479,7 @@ export function RemoteMachinesManager() {
             {machines.map((machine) => {
               const status = statuses[machine.id];
               const platformLabel = formatPlatformLabel(machine.platform);
+              const routeBadges = routeBadgesFor(machine, status);
               const checking = status?.state === "checking";
               const offline = status?.state === "offline";
               return (
@@ -440,6 +500,12 @@ export function RemoteMachinesManager() {
                         <Badge tone="success">Online</Badge>
                       )}
                       {offline && <Badge>Offline</Badge>}
+                      {routeBadges.map((label) => (
+                        <Badge key={label}>{label}</Badge>
+                      ))}
+                      {machine.source === "discovered" && (
+                        <Badge>Discovered</Badge>
+                      )}
                       {machine.role === "guest" && <Badge>Guest</Badge>}
                     </span>
                   }
@@ -494,7 +560,13 @@ export function RemoteMachinesManager() {
             title={
               view.kind === "edit" ? `Edit ${view.machine.name}` : "Add machine"
             }
-            subtitle="Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
+            subtitle={
+              view.kind === "edit" &&
+              hasIrohRoute(view.machine) &&
+              !primaryWssUrl(view.machine)
+                ? "This machine connects over Iroh. Optionally add a wss:// fallback URL or update its access token."
+                : "Paste a buzz-host pairing link (wss://…#token=bha_…) or a server URL."
+            }
           />
           <MachineEditorForm
             key={view.kind === "edit" ? view.machine.id : "add"}

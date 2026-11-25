@@ -48,11 +48,12 @@ mod host_request;
 mod mesh_compute;
 use mesh_compute::MeshHost;
 mod identity;
+mod iroh_tunnel;
 mod native_mcp;
-mod remote_machines;
 mod nsec_backup;
 mod nsec_backup_choice;
 mod nsec_backup_config;
+mod remote_machines;
 use nsec_backup::{
     nsec_backup_available, nsec_backup_confirmed, nsec_backup_retry, nsec_backup_session,
     nsec_backup_state, nsec_backup_watch, nsec_restore_begin, nsec_restore_cancel,
@@ -758,6 +759,9 @@ fn commands<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Sen
         pairing::pairing_deny,
         pairing::pairing_cancel,
         qr::qr_code,
+        iroh_tunnel::iroh_tunnel_available,
+        iroh_tunnel::iroh_tunnel_endpoint,
+        iroh_tunnel::iroh_tunnel_disconnect,
         sharing::share_image,
         identity_restore,
         identity_import,
@@ -1280,6 +1284,7 @@ pub fn run() {
         .manage(clipboard::Clipboard::default())
         .manage(mesh_compute::identity(identity.clone()))
         .manage(MeshHost::default())
+        .manage(iroh_tunnel::IrohTunnelManager::default())
         .manage(keep_awake::KeepAwake::default())
         .manage(identity)
         .manage(archive::ArchiveHost::default())
