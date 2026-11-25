@@ -1,4 +1,9 @@
 import { useSyncExternalStore } from "react";
+import {
+  irohTunnelDisconnect,
+  type MachineRouteType,
+  resolveMachineWebSocketCandidates,
+} from "./iroh-tunnel";
 
 export const REMOTE_MACHINES_KEY = "local.buzz-host.machines.v1";
 export const REMOTE_AGENT_HOSTS_KEY = "local.buzz-host.agent-hosts.v1";
@@ -8,6 +13,7 @@ export const LEGACY_TOKEN_KEY = "local.buzz-host.token";
 export const REMOTE_MACHINES_CHANGED = "buzz-host:machines-changed";
 export const REMOTE_AGENT_HOSTS_CHANGED = "buzz-host:agent-hosts-changed";
 export const SELF_HOSTED_TYPE_KEY = "local.buzz-host/omarchy";
+export const DISCOVERY_FRESHNESS_MS = 120_000;
 
 export type RemoteMachineRoute =
   | Readonly<{ type: "wss"; url: string }>
@@ -42,6 +48,8 @@ export type RemoteMachineStatus = Readonly<{
   error?: string;
   agentCount?: number;
   checkedAt?: number;
+  /** The route the last successful check connected over. */
+  activeRoute?: MachineRouteType;
 }>;
 
 export type RemoteMachineProbeResult = Readonly<{
@@ -650,6 +658,131 @@ export function updateRemoteMachine(
   return updated;
 }
 
+export type DiscoveredMachineInput = Readonly<{
+  machineId: string;
+  name: string;
+  routes: readonly RemoteMachineRoute[];
+  platform?: string;
+  host?: string;
+  runtimes?: readonly string[];
+  capabilities?: RemoteMachineCapabilities;
+  publicGuestUrl?: string | null;
+  agents?: readonly Readonly<{ pubkey: string; name?: string }>[];
+  lastSeen?: number;
+}>;
+
+function canonicalWssUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    const path =
+      parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.protocol}//${parsed.host}${path}${parsed.search}`;
+  } catch {
+    return trimmed.replace(/\/+$/, "");
+  }
+}
+
+/**
+ * Merge a discovered machine record (from Nostr kind:30003 presence) into the
+ * registry. Matches by `machineId` or primary `wss` URL, never clobbers a
+ * user-configured `token` or manual `name`, keeps `source: "manual"` on
+ * manually configured machines, creates brand-new machines with
+ * `source: "discovered"` and `id: machineId`, and merges advertised `agents`.
+ */
+export function mergeDiscoveredMachine(
+  input: DiscoveredMachineInput,
+): RemoteMachine | undefined {
+  const machineId = input.machineId.trim();
+  if (!machineId) return undefined;
+  const incomingRoutes = normalizeRoutes(input.routes, "");
+  const incomingWss =
+    incomingRoutes.find((route) => route.type === "wss")?.url ?? "";
+  const incomingCanonical = canonicalWssUrl(incomingWss);
+  const machines = readMachinesFromStorage();
+  const existing =
+    machines.find((m) => m.id === machineId) ??
+    (incomingCanonical
+      ? machines.find(
+          (m) => canonicalWssUrl(primaryWssUrl(m)) === incomingCanonical,
+        )
+      : undefined);
+  const lastSeen = input.lastSeen ?? Date.now();
+
+  if (!existing) {
+    if (incomingRoutes.length === 0) return undefined;
+    const created = addRemoteMachine({
+      id: machineId,
+      name: input.name,
+      url: incomingWss,
+      routes: incomingRoutes,
+      source: "discovered",
+      ...(input.platform !== undefined ? { platform: input.platform } : {}),
+      ...(input.host !== undefined ? { host: input.host } : {}),
+      ...(input.runtimes !== undefined ? { runtimes: input.runtimes } : {}),
+      ...(input.capabilities !== undefined
+        ? { capabilities: input.capabilities }
+        : {}),
+      ...(input.publicGuestUrl !== undefined
+        ? { publicGuestUrl: input.publicGuestUrl }
+        : {}),
+      lastSeen,
+    });
+    if (input.agents !== undefined) {
+      mergeAgentMachines(
+        created.id,
+        input.agents.map((a) => a.pubkey),
+      );
+    }
+    return created;
+  }
+
+  let nextRoutes = existing.routes;
+  let nextUrl = existing.url;
+  if (incomingRoutes.length > 0) {
+    if (existing.source === "manual") {
+      const existingWss = primaryWssUrl(existing);
+      nextUrl = incomingWss || existingWss;
+      nextRoutes =
+        incomingWss || !existingWss
+          ? incomingRoutes
+          : normalizeRoutes(
+              [...incomingRoutes, { type: "wss" as const, url: existingWss }],
+              existingWss,
+            );
+    } else {
+      nextUrl = incomingWss;
+      nextRoutes = incomingRoutes;
+    }
+  }
+
+  const updated = updateRemoteMachine(existing.id, {
+    ...(existing.source === "discovered" && input.name.trim()
+      ? { name: input.name.trim() }
+      : {}),
+    url: nextUrl,
+    routes: nextRoutes,
+    ...(input.platform !== undefined ? { platform: input.platform } : {}),
+    ...(input.host !== undefined ? { host: input.host } : {}),
+    ...(input.runtimes !== undefined ? { runtimes: input.runtimes } : {}),
+    ...(input.capabilities !== undefined
+      ? { capabilities: input.capabilities }
+      : {}),
+    ...(input.publicGuestUrl !== undefined
+      ? { publicGuestUrl: input.publicGuestUrl }
+      : {}),
+    lastSeen,
+  });
+  if (updated && input.agents !== undefined) {
+    mergeAgentMachines(
+      updated.id,
+      input.agents.map((a) => a.pubkey),
+    );
+  }
+  return updated;
+}
+
 /**
  * Merge a discovered machine record (e.g. from Nostr kind:30003 presence) into
  * the registry without overwriting a user's manually assigned name or token.
@@ -662,27 +795,28 @@ export function upsertDiscoveredMachine(input: {
   host?: string;
   runtimes?: readonly string[];
   capabilities?: RemoteMachineCapabilities;
+  publicGuestUrl?: string | null;
+  agents?: readonly Readonly<{ pubkey: string; name?: string }>[];
   lastSeen?: number;
 }): RemoteMachine {
-  const existing = readMachinesFromStorage().find((m) => m.id === input.id);
-  if (!existing) {
-    return addRemoteMachine({
-      ...input,
-      source: "discovered",
-      lastSeen: input.lastSeen ?? Date.now(),
-    });
-  }
-  const updated = updateRemoteMachine(existing.id, {
-    ...(existing.source === "discovered" ? { name: input.name } : {}),
+  const merged = mergeDiscoveredMachine({
+    machineId: input.id,
+    name: input.name,
     routes: input.routes,
-    ...(input.platform ? { platform: input.platform } : {}),
-    ...(input.host ? { host: input.host } : {}),
-    ...(input.runtimes ? { runtimes: input.runtimes } : {}),
-    ...(input.capabilities ? { capabilities: input.capabilities } : {}),
-    lastSeen: input.lastSeen ?? Date.now(),
+    ...(input.platform !== undefined ? { platform: input.platform } : {}),
+    ...(input.host !== undefined ? { host: input.host } : {}),
+    ...(input.runtimes !== undefined ? { runtimes: input.runtimes } : {}),
+    ...(input.capabilities !== undefined
+      ? { capabilities: input.capabilities }
+      : {}),
+    ...(input.publicGuestUrl !== undefined
+      ? { publicGuestUrl: input.publicGuestUrl }
+      : {}),
+    ...(input.agents !== undefined ? { agents: input.agents } : {}),
+    ...(input.lastSeen !== undefined ? { lastSeen: input.lastSeen } : {}),
   });
-  if (!updated) throw new Error("Could not update discovered machine.");
-  return updated;
+  if (!merged) throw new Error("Could not update discovered machine.");
+  return merged;
 }
 
 export function removeRemoteMachine(id: string): void {
@@ -712,12 +846,15 @@ export function removeRemoteMachine(id: string): void {
     filtered[pubkey] = machineId;
   }
   if (changed) writeAgentHostsToStorage(filtered);
+  statusOriginMap.delete(id);
+  probeCheckedAtMap.delete(id);
   if (statusMap[id]) {
     const nextStatuses = { ...statusMap };
     delete nextStatuses[id];
     statusMap = Object.freeze(nextStatuses);
     emitStatuses();
   }
+  void irohTunnelDisconnect(id);
 }
 
 export function setAgentMachine(pubkey: string, machineId: string): void {
@@ -808,7 +945,11 @@ export function useRemoteAgentHosts(): Readonly<Record<string, string>> {
 
 // ----- Live probe & per-machine status store -----
 
+type StatusOrigin = "probe" | "discovery";
+
 let statusMap: Readonly<Record<string, RemoteMachineStatus>> = EMPTY_STATUSES;
+const statusOriginMap = new Map<string, StatusOrigin>();
+const probeCheckedAtMap = new Map<string, number>();
 const statusListeners = new Set<() => void>();
 
 function emitStatuses() {
@@ -818,6 +959,118 @@ function emitStatuses() {
 function setMachineStatus(id: string, status: RemoteMachineStatus) {
   statusMap = Object.freeze({ ...statusMap, [id]: Object.freeze(status) });
   emitStatuses();
+}
+
+/**
+ * Update a machine's live status from a verified Nostr discovery heartbeat.
+ * Respects the 120s freshness window and explicit `status: "stopped"`, and
+ * never clobbers an in-flight or newer manual probe.
+ */
+export function updateDiscoveredMachineStatus(
+  id: string,
+  input: Readonly<{
+    status: "online" | "stopped";
+    observedAt: number;
+    agentCount?: number;
+    now?: number;
+  }>,
+): void {
+  const machine = readMachinesFromStorage().find((m) => m.id === id);
+  if (!machine) return;
+  const current = statusMap[id];
+  if (current?.state === "checking") return;
+  const now = input.now ?? Date.now();
+  const lastProbeAt = probeCheckedAtMap.get(id);
+  if (lastProbeAt !== undefined && lastProbeAt > input.observedAt) return;
+
+  const next: RemoteMachineStatus =
+    input.status === "stopped"
+      ? {
+          state: "offline",
+          error: "Host stopped.",
+          ...(input.agentCount !== undefined
+            ? { agentCount: input.agentCount }
+            : {}),
+          checkedAt: input.observedAt,
+        }
+      : now - input.observedAt <= DISCOVERY_FRESHNESS_MS
+        ? {
+            state: "online",
+            ...(input.agentCount !== undefined
+              ? { agentCount: input.agentCount }
+              : {}),
+            checkedAt: input.observedAt,
+            ...(current?.state === "online" && current.activeRoute
+              ? { activeRoute: current.activeRoute }
+              : {}),
+          }
+        : {
+            state: "offline",
+            error: "Host heartbeat timed out.",
+            ...(input.agentCount !== undefined
+              ? { agentCount: input.agentCount }
+              : {}),
+            checkedAt: input.observedAt,
+          };
+
+  statusOriginMap.set(id, "discovery");
+  if (
+    current &&
+    current.state === next.state &&
+    current.error === next.error &&
+    current.agentCount === next.agentCount &&
+    current.checkedAt === next.checkedAt &&
+    current.activeRoute === next.activeRoute
+  ) {
+    return;
+  }
+  setMachineStatus(id, next);
+}
+
+/**
+ * Mark stale discovered machines offline once `lastSeen` exceeds the 120s
+ * freshness window, without clobbering active or manual probes when no
+ * discovery event exists.
+ */
+export function sweepStaleDiscoveredMachines(now = Date.now()): boolean {
+  const machines = readMachinesFromStorage();
+  let changed = false;
+  let nextStatuses: Record<string, RemoteMachineStatus> | undefined;
+  for (const machine of machines) {
+    const origin = statusOriginMap.get(machine.id);
+    if (machine.source !== "discovered" && origin !== "discovery") continue;
+    const current = statusMap[machine.id];
+    if (current?.state === "checking") continue;
+    const lastProbeAt = probeCheckedAtMap.get(machine.id);
+    if (
+      origin === "probe" &&
+      lastProbeAt !== undefined &&
+      now - lastProbeAt <= DISCOVERY_FRESHNESS_MS
+    ) {
+      continue;
+    }
+    const lastSeen = machine.lastSeen ?? current?.checkedAt;
+    if (lastSeen !== undefined && now - lastSeen <= DISCOVERY_FRESHNESS_MS) {
+      continue;
+    }
+    if (current?.state === "offline") continue;
+    if (!nextStatuses) nextStatuses = { ...statusMap };
+    nextStatuses[machine.id] = Object.freeze({
+      state: "offline",
+      error: "Host heartbeat timed out.",
+      ...(current?.agentCount !== undefined
+        ? { agentCount: current.agentCount }
+        : {}),
+      checkedAt: lastSeen ?? now,
+    });
+    statusOriginMap.set(machine.id, "discovery");
+    changed = true;
+  }
+  if (changed && nextStatuses) {
+    statusMap = Object.freeze(nextStatuses);
+    emitStatuses();
+  }
+  return changed;
 }
 
 export function remoteMachineStatusesSnapshot(): Readonly<
@@ -845,6 +1098,9 @@ export function useRemoteMachineStatuses(): Readonly<
 
 type WebSocketConstructor = new (url: string) => WebSocket;
 
+/** The native tunnel's `ws://127.0.0.1:<port>/t/…` URLs (never user input). */
+const LOOPBACK_TUNNEL_URL = /^ws:\/\/127\.0\.0\.1:\d{1,5}\/t\//;
+
 /**
  * Connect to a buzz-host endpoint, authenticate if a token is supplied, call
  * `hello` and `list`, and close the probe socket cleanly.
@@ -855,18 +1111,22 @@ export async function probeRemoteMachine({
   signal,
   timeoutMs = 15000,
   WebSocketImpl = WebSocket,
+  allowLoopbackTunnel = false,
 }: {
   url: string;
   token?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   WebSocketImpl?: WebSocketConstructor;
+  /** Also accept the native Iroh tunnel's loopback URL. */
+  allowLoopbackTunnel?: boolean;
 }): Promise<RemoteMachineProbeResult> {
   if (signal?.aborted) {
     throw new DOMException("Aborted", "AbortError");
   }
-  const parsed = parseMachineInput(url);
-  if (parsed.error) throw new Error(parsed.error);
+  const tunnelled = allowLoopbackTunnel && LOOPBACK_TUNNEL_URL.test(url);
+  const parsed = tunnelled ? { url, token: undefined } : parseMachineInput(url);
+  if ("error" in parsed && parsed.error) throw new Error(parsed.error);
   const cleanUrl = parsed.url;
   const cleanToken = (parsed.token ?? token).trim();
 
@@ -1033,56 +1293,80 @@ export async function refreshRemoteMachine(
 ): Promise<RemoteMachineProbeResult | undefined> {
   const machine = readMachinesFromStorage().find((m) => m.id === id);
   if (!machine) return undefined;
-  const wssUrl = primaryWssUrl(machine);
-  if (!wssUrl) {
-    setMachineStatus(id, {
-      state: "offline",
-      error: "No reachable WebSocket route configured for this machine yet.",
-      checkedAt: Date.now(),
-    });
-    return undefined;
-  }
+  statusOriginMap.set(id, "probe");
   setMachineStatus(id, {
     ...statusMap[id],
     state: "checking",
   });
-  try {
-    const result = await probeRemoteMachine({
-      url: wssUrl,
-      token: machine.token,
-      ...options,
-    });
+  const candidates = await resolveMachineWebSocketCandidates(machine);
+  if (options?.signal?.aborted) return undefined;
+  if (!candidates.length) {
     const now = Date.now();
-    updateRemoteMachine(id, {
-      ...(result.platform ? { platform: result.platform } : {}),
-      ...(result.host ? { host: result.host } : {}),
-      ...(result.role ? { role: result.role } : {}),
-      ...(result.runtimes ? { runtimes: result.runtimes } : {}),
-      ...(result.capabilities ? { capabilities: result.capabilities } : {}),
-      ...(result.publicGuestUrl !== undefined
-        ? { publicGuestUrl: result.publicGuestUrl }
-        : {}),
-      lastSeen: now,
-    });
-    mergeAgentMachines(
-      id,
-      result.agents.map((a) => a.pubkey),
-    );
-    setMachineStatus(id, {
-      state: "online",
-      agentCount: result.agents.length,
-      checkedAt: now,
-    });
-    return result;
-  } catch (error) {
-    if (options?.signal?.aborted) return undefined;
+    statusOriginMap.set(id, "probe");
+    probeCheckedAtMap.set(id, now);
     setMachineStatus(id, {
       state: "offline",
-      error: error instanceof Error ? error.message : String(error),
-      checkedAt: Date.now(),
+      error: "No reachable WebSocket route configured for this machine yet.",
+      checkedAt: now,
     });
     return undefined;
   }
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      const result = await probeRemoteMachine({
+        url: candidate.url,
+        token: machine.token,
+        allowLoopbackTunnel: candidate.routeType === "iroh",
+        ...options,
+      });
+      recordProbe(id, result, candidate.routeType);
+      return result;
+    } catch (error) {
+      if (options?.signal?.aborted) return undefined;
+      lastError = error;
+    }
+  }
+  const now = Date.now();
+  statusOriginMap.set(id, "probe");
+  probeCheckedAtMap.set(id, now);
+  setMachineStatus(id, {
+    state: "offline",
+    error: lastError instanceof Error ? lastError.message : String(lastError),
+    checkedAt: now,
+  });
+  return undefined;
+}
+
+function recordProbe(
+  id: string,
+  result: RemoteMachineProbeResult,
+  activeRoute: MachineRouteType,
+) {
+  const now = Date.now();
+  updateRemoteMachine(id, {
+    ...(result.platform ? { platform: result.platform } : {}),
+    ...(result.host ? { host: result.host } : {}),
+    ...(result.role ? { role: result.role } : {}),
+    ...(result.runtimes ? { runtimes: result.runtimes } : {}),
+    ...(result.capabilities ? { capabilities: result.capabilities } : {}),
+    ...(result.publicGuestUrl !== undefined
+      ? { publicGuestUrl: result.publicGuestUrl }
+      : {}),
+    lastSeen: now,
+  });
+  mergeAgentMachines(
+    id,
+    result.agents.map((a) => a.pubkey),
+  );
+  statusOriginMap.set(id, "probe");
+  probeCheckedAtMap.set(id, now);
+  setMachineStatus(id, {
+    state: "online",
+    agentCount: result.agents.length,
+    checkedAt: now,
+    activeRoute,
+  });
 }
 
 export async function refreshAllRemoteMachines(options?: {
@@ -1104,6 +1388,8 @@ export function resetRemoteMachinesCache(): void {
   cachedMachines = EMPTY_MACHINES;
   cachedAgentHostsRaw = undefined;
   cachedAgentHosts = EMPTY_AGENT_HOSTS;
+  statusOriginMap.clear();
+  probeCheckedAtMap.clear();
   statusMap = EMPTY_STATUSES;
   emitStatuses();
 }

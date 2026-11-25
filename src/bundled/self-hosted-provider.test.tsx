@@ -107,3 +107,40 @@ it("gives only the Self-hosted type the provider and icon, through a real plugin
   await fiber.dispose();
   expect(cleanup).toHaveBeenCalledOnce();
 });
+
+it("starts remote machine discovery on apply and stops it on fiber dispose", async () => {
+  const discovery = await import("../features/agents/remote-machine-discovery");
+  const stop = vi.fn();
+  const startSpy = vi
+    .spyOn(discovery, "startRemoteMachineDiscovery")
+    .mockReturnValue(stop);
+  try {
+    const relay = {
+      snapshot: () => ({ status: "disconnected", generation: 0 }),
+      subscribe: () => () => {},
+    };
+    const communityReader = {
+      snapshot: () => ({ status: "loading", memberships: [] }),
+      subscribe: () => () => {},
+      retained: () => undefined,
+    };
+    const root = new Context();
+    root.provide("agents", { register: vi.fn(), registerTab: vi.fn() });
+    root.provide("relay", relay as never);
+    root.provide("communityReader", communityReader as never);
+    const fiber = root.plugin(
+      withSelfHostedProvider({
+        apply() {},
+      }),
+    );
+    await fiber;
+    expect(startSpy).toHaveBeenCalledOnce();
+    expect(startSpy).toHaveBeenCalledWith({ relay, communityReader });
+    expect(stop).not.toHaveBeenCalled();
+
+    await fiber.dispose();
+    expect(stop).toHaveBeenCalledOnce();
+  } finally {
+    startSpy.mockRestore();
+  }
+});
