@@ -3357,7 +3357,7 @@ function createServerCard({ React, client, uiKit, Btn, relay, navigation }) {
 		version: 1,
 		kind: "settings",
 		section: "agents",
-		provider: "omarchy"
+		provider: "local.buzz-host/omarchy"
 	});
 	function Check({ checked, disabled, onChange, title, hint }) {
 		return h("label", { style: {

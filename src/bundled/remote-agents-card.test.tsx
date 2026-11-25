@@ -8,7 +8,9 @@ import * as plugin from "../../plugins/remote-agents/plugin.js";
 import {
   addRemoteMachine,
   resetRemoteMachinesCache,
+  SELF_HOSTED_TYPE_KEY,
 } from "../features/agents/remote-machines";
+import { parseOpenTarget } from "../features/navigation/targets";
 
 type Json = Record<string, unknown>;
 
@@ -141,8 +143,9 @@ it("shows a connect call-to-action instead of a form when no machine is set up",
     version: 1,
     kind: "settings",
     section: "agents",
-    provider: "omarchy",
+    provider: SELF_HOSTED_TYPE_KEY,
   });
+  expect(() => parseOpenTarget(open.mock.calls[0]?.[0])).not.toThrow();
 });
 
 it("shows a compact status banner with a link to Agent setup and no chat-command tutorial", async () => {
@@ -169,8 +172,9 @@ it("shows a compact status banner with a link to Agent setup and no chat-command
     version: 1,
     kind: "settings",
     section: "agents",
-    provider: "omarchy",
+    provider: SELF_HOSTED_TYPE_KEY,
   });
+  expect(() => parseOpenTarget(open.mock.calls[0]?.[0])).not.toThrow();
 });
 
 it("says Offline with a retry when the machine cannot be reached", async () => {
