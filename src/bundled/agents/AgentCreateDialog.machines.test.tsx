@@ -72,14 +72,19 @@ function makeSelfHostedType(mountedIds: string[]): RegisteredAgentType {
       instructions: { get: vi.fn(), set: vi.fn() },
       remove: vi.fn(),
     },
-    CreateConfiguration: ({ config, onReadyChange }) => {
+    CreateConfiguration: ({ config, harnessControl, onReadyChange }) => {
       const machineId =
         (config as { machineId?: string } | undefined)?.machineId ?? "";
       mountedIds.push(machineId);
       useEffect(() => {
         onReadyChange?.(true);
       }, [onReadyChange]);
-      return <div data-testid="self-hosted-config">machine:{machineId}</div>;
+      return (
+        <>
+          {harnessControl}
+          <div data-testid="self-hosted-config">machine:{machineId}</div>
+        </>
+      );
     },
     Create: () => null,
   };
@@ -179,6 +184,59 @@ it("lets the user pick between This computer and configured remote machines and 
     }),
   );
   expect(machineForAgent(createdAgent.pubkey)?.id).toBe(linux.id);
+});
+
+it("keeps Self-hosted out of Harness and hides Harness on a remote machine", async () => {
+  const machine = addRemoteMachine({
+    name: "Omarchy",
+    url: "wss://omarchy.example.org:8447",
+    platform: "linux",
+  });
+  const codex: RegisteredAgentType = {
+    ...localHarness,
+    key: "local/codex",
+    id: "codex",
+    title: "Codex",
+  };
+  const agents = { previewRetype: () => undefined } as unknown as Agents;
+  const user = userEvent.setup();
+  render(
+    <AgentCreateDialog
+      agents={agents}
+      types={[localHarness, codex, makeSelfHostedType([])]}
+      onClose={() => {}}
+      onCreated={() => {}}
+      onCreate={vi.fn()}
+    />,
+  );
+
+  const dialog = screen.getByRole("dialog", { name: "Create agent" });
+  await user.click(within(dialog).getByRole("combobox", { name: "Harness" }));
+  expect(
+    await screen.findByRole("option", { name: "Codex" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("option", { name: "Self-hosted" }),
+  ).not.toBeInTheDocument();
+  await user.keyboard("{Escape}");
+
+  await user.click(within(dialog).getByRole("combobox", { name: "Run on" }));
+  await user.click(await screen.findByRole("option", { name: /Omarchy/ }));
+  expect(within(dialog).getByTestId("self-hosted-config")).toHaveTextContent(
+    `machine:${machine.id}`,
+  );
+  expect(
+    within(dialog).queryByRole("combobox", { name: "Harness" }),
+  ).not.toBeInTheDocument();
+
+  // Back on this computer, Harness returns with the local harnesses.
+  await user.click(within(dialog).getByRole("combobox", { name: "Run on" }));
+  await user.click(
+    await screen.findByRole("option", { name: "This computer" }),
+  );
+  expect(
+    within(dialog).getByRole("combobox", { name: "Harness" }),
+  ).toHaveTextContent("Claude Code");
 });
 
 it("hides Run on and leaves the active machine alone without the Remote Agents plugin", () => {

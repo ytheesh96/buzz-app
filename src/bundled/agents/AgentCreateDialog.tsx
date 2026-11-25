@@ -622,7 +622,12 @@ export function AgentCreateDialog({
   };
   const saveSettings: AgentViewProps["save"] = (config) =>
     create(false, { config });
-  const harnessControl = (
+  // Run on picks the machine, so Harness lists only harnesses; on a remote
+  // machine, that machine's own rows pick its harness.
+  const harnesses = showRunOn
+    ? choices.filter((item) => item.key !== SELF_HOSTED_TYPE_KEY)
+    : choices;
+  const harnessRow = (
     <PreferenceRow
       id={harnessId}
       title="Harness"
@@ -634,11 +639,11 @@ export function AgentCreateDialog({
             align="end"
             value={type?.key ?? ""}
             leading={<TypeIcon type={type} size={20} />}
-            disabled={pending || choices.length < 2}
+            disabled={pending || harnesses.length < 2}
             groups={[true, false]
               .map((remote) => ({
                 label: remote ? "Remote" : "Local",
-                options: choices
+                options: harnesses
                   .filter((item) => Boolean(item.remote) === remote)
                   .map((item) => ({
                     value: item.key,
@@ -660,6 +665,7 @@ export function AgentCreateDialog({
       }
     />
   );
+  const harnessControl = showRunOn && isSelfHostedSelected ? null : harnessRow;
   const errorMessage = error && (
     <p
       key={error}

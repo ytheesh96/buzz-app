@@ -1625,7 +1625,8 @@ If an agent reports incompatible synced settings, choose the **Previous Versions
   Builderlab. Its dialog adds, checks, edits and removes the Linux or macOS
   machines running buzz-host that this app connects to; a pairing link
   (`wss://…#token=…`) fills in the access token. **Run on** in Create agent
-  picks one of these machines.
+  picks one of these machines or this computer; **Harness** then picks from
+  the harnesses that run there.
   Claude uses your own Claude setup when one already works on this computer,
   such as Amazon Bedrock or Google Vertex AI, configured with the Claude CLI. Buzz never changes that setup or adds its
   key to it. Without one, Claude runs with an Anthropic API key pasted under
