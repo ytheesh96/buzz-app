@@ -15,7 +15,10 @@
       "name": "Viewport",
       "apiVersion": 1,
       "description": "In-app Viewport page, live remote desktop preview, and takeover controls for self-hosted agents.",
-      "discovery": { "category": "agents", "tags": ["self-hosted", "remote"] }
+      "discovery": {
+        "category": "agent-tools",
+        "tags": ["self-hosted", "remote"]
+      }
     },
     "enabledByDefault": true
   }
