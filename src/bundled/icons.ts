@@ -1,12 +1,18 @@
-const manifests = import.meta.glob<{ id: string }>("./*/manifest.json", {
-  eager: true,
-  import: "default",
-});
-const icons = import.meta.glob<string>("./*/icon.{png,jpg}", {
-  eager: true,
-  query: "?url",
-  import: "default",
-});
+const manifests = import.meta.glob<{ id: string }>(
+  ["./*/manifest.json", "../../plugins/*/manifest.json"],
+  {
+    eager: true,
+    import: "default",
+  },
+);
+const icons = import.meta.glob<string>(
+  ["./*/icon.{png,jpg}", "../../plugins/*/icon.{png,jpg}"],
+  {
+    eager: true,
+    query: "?url",
+    import: "default",
+  },
+);
 
 export const bundledIcons: ReadonlyMap<string, string> = new Map(
   Object.entries(manifests).flatMap(([path, manifest]) => {

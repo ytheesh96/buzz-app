@@ -1,6 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { bundledPlugins } from ".";
+import { bundledIcons } from "./icons";
 import { orgPlugins } from "./org";
+import { bundledReadmes } from "./readmes";
 
 afterEach(() => {
   vi.doUnmock("./org.json");
@@ -18,6 +20,31 @@ it("bundles Remote Agents and Viewport after the rest", () => {
   expect(
     bundledPlugins.slice(bundledPlugins.length - orgPlugins.length),
   ).toEqual(orgPlugins);
+});
+
+it("categorizes Viewport under Agent tools and ships icons and READMEs for org plugins", () => {
+  const byId = new Map(
+    orgPlugins.map((plugin) => [plugin.manifest.id, plugin]),
+  );
+  expect(byId.get("local.buzz-host")?.manifest.discovery?.category).toBe(
+    "agents",
+  );
+  expect(
+    byId.get("local.buzz-host.viewport")?.manifest.discovery?.category,
+  ).toBe("agent-tools");
+
+  for (const { manifest } of orgPlugins) {
+    expect(bundledIcons.get(manifest.id), `${manifest.id} icon`).toBeTruthy();
+    const [guide = ""] = (bundledReadmes.get(manifest.id) ?? "").split(
+      "\n---\n",
+    );
+    expect(guide.split("\n")[0], `${manifest.id} readme title`).toBe(
+      `# ${manifest.name}`,
+    );
+    expect(guide.match(/^## .*/gm), `${manifest.id} readme headings`).toEqual([
+      "## Getting started",
+    ]);
+  }
 });
 
 it("leaves out a plugin org.json lists without code in org.ts", async () => {
