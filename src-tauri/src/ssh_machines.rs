@@ -953,55 +953,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // E2E-TEMP: manual end-to-end run, not committed.
-    #[tokio::test]
-    #[ignore]
-    async fn e2e_setup_and_tunnel() {
-        let env = |k: &str| std::env::var(k).ok();
-        let target = env("BUZZ_SSH_E2E_TARGET").unwrap();
-        let ssh = PathBuf::from(env("BUZZ_SSH_E2E_SSH").unwrap_or_else(|| "ssh".into()));
-        let scp = PathBuf::from(env("BUZZ_SSH_E2E_SCP").unwrap_or_else(|| "scp".into()));
-        let release = env("BUZZ_SSH_E2E_RELEASE").map(PathBuf::from);
-        let out = PathBuf::from(env("BUZZ_SSH_E2E_OUT").unwrap());
-        let progress = |e: SetupProgress| eprintln!("progress: {e:?}");
-        let result = setup((&ssh, &scp), &target, release.as_deref(), &progress)
-            .await
-            .unwrap();
-        eprintln!(
-            "setup: version={} url={} installed={} previous={:?} platform={} tunnel_port={:?}",
-            result.up.version, result.up.url, result.installed, result.previous_version,
-            result.platform, result.tunnel_port
-        );
-        let tunnels = SshTunnels::default();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let record = seen.clone();
-        *tunnels.notify.lock().unwrap() = Some(Arc::new(move |state: TunnelState| {
-            eprintln!("tunnel event: {state:?}");
-            record.lock().unwrap().push(state.state);
-        }));
-        let state = tunnels
-            .open(
-                ssh.clone(),
-                "m_e2e",
-                Spec { target: target.clone(), remote_port: result.tunnel_port.unwrap() },
-                None,
-            )
-            .await
-            .unwrap();
-        eprintln!("tunnel open: {state:?}");
-        std::fs::write(
-            &out,
-            format!("PORT={}\nTOKEN={}\n", state.local_port, result.up.token),
-        )
-        .unwrap();
-        let hold = env("BUZZ_SSH_E2E_HOLD_SECS").and_then(|s| s.parse().ok()).unwrap_or(0);
-        tokio::time::sleep(Duration::from_secs(hold)).await;
-        eprintln!("phases: {:?}", seen.lock().unwrap());
-        tunnels.close("m_e2e");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        eprintln!("closed; states: {:?}", tunnels.states());
-    }
-
     /// A fake `ssh` that runs the forward with a local TCP relay, so the
     /// supervisor's connect, drop and reconnect run without a network.
     #[cfg(unix)]

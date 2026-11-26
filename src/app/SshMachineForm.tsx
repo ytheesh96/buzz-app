@@ -239,7 +239,11 @@ export function SshMachineForm({
             setError("");
           }}
           onValueChange={(next) => {
-            if (next) setTarget(next);
+            if (next) {
+              setTarget(next);
+              setTargetError(undefined);
+              setError("");
+            }
           }}
           value={null}
           disabled={pending}
