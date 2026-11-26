@@ -24,6 +24,7 @@ import {
   agentHostMapSnapshot,
   deriveMachineName,
   formatPlatformLabel,
+  isValidSshTarget,
   machineForAgent,
   mergeAgentMachines,
   mergeDiscoveredMachine,
@@ -578,6 +579,85 @@ describe("remote-machines", () => {
         WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
       }),
     ).rejects.toThrow(/wss:\/\//);
+  });
+
+  it("stores SSH machines with their forward as the URL and rejects option-like targets", () => {
+    const machine = addRemoteMachine({
+      id: "m_ssh",
+      name: "Mini",
+      token: "bha_token",
+      routes: [
+        { type: "ssh", target: "yt@mini", remotePort: 8467, localPort: 40123 },
+      ],
+    });
+    expect(machine.url).toBe("ws://127.0.0.1:40123");
+    expect(primaryWssUrl(machine)).toBe("");
+    // A changed local port moves the URL with it.
+    const moved = updateRemoteMachine("m_ssh", {
+      routes: [
+        { type: "ssh", target: "yt@mini", remotePort: 8467, localPort: 40999 },
+      ],
+    });
+    expect(moved?.url).toBe("ws://127.0.0.1:40999");
+    expect(remoteMachinesSnapshot()[0]?.routes).toEqual([
+      { type: "ssh", target: "yt@mini", remotePort: 8467, localPort: 40999 },
+    ]);
+
+    for (const ok of ["m1", "yt@m1", "host.example.org", "user@[::1]"])
+      expect(isValidSshTarget(ok), ok).toBe(true);
+    for (const bad of [
+      "",
+      "-oProxyCommand=id",
+      "a b",
+      "host;id",
+      "user@",
+      "a@b@c",
+    ])
+      expect(isValidSshTarget(bad), bad).toBe(false);
+    expect(() =>
+      addRemoteMachine({
+        name: "Bad",
+        routes: [
+          {
+            type: "ssh",
+            target: "-oProxyCommand=id",
+            remotePort: 8467,
+            localPort: 1,
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("probes an SSH machine through its forward and records activeRoute: ssh", async () => {
+    FakeWebSocket.handler = (ws, msg) => {
+      if (msg.method === "auth") ws.reply(msg.id, { role: "admin" });
+      if (msg.method === "hello")
+        ws.reply(msg.id, { host: "mini", platform: "darwin", role: "admin" });
+      if (msg.method === "list") ws.reply(msg.id, { agents: [] });
+    };
+    const machine = addRemoteMachine({
+      id: "m_ssh",
+      name: "Mini",
+      token: "bha_token",
+      routes: [
+        { type: "ssh", target: "mini", remotePort: 8467, localPort: 40123 },
+      ],
+    });
+    await refreshRemoteMachine(machine.id, {
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    expect(FakeWebSocket.instances.map((ws) => ws.url)).toEqual([
+      "ws://127.0.0.1:40123",
+    ]);
+    expect(FakeWebSocket.instances[0]?.sent[0]).toMatchObject({
+      method: "auth",
+      params: { token: "bha_token" },
+    });
+    expect(remoteMachineStatusesSnapshot()[machine.id]).toMatchObject({
+      state: "online",
+      activeRoute: "ssh",
+    });
   });
 
   it("probes iroh first in desktop mode and records activeRoute: iroh", async () => {

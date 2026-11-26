@@ -1,7 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { RemoteMachine } from "./remote-machines";
 
-export type MachineRouteType = "iroh" | "wss";
+export type MachineRouteType = "iroh" | "ssh" | "wss";
 
 export type MachineWebSocketCandidate = Readonly<{
   routeType: MachineRouteType;
@@ -58,7 +58,8 @@ function withPath(wssUrl: string, path: string | undefined): string {
 
 /**
  * WebSocket URLs to try for a machine, best first: the Iroh tunnel when it is
- * available and the machine advertises an endpoint, then its `wss` route.
+ * available and the machine advertises an endpoint, then its SSH forward,
+ * then its `wss` route.
  */
 export async function resolveMachineWebSocketCandidates(
   machine: TunnelMachine,
@@ -81,8 +82,19 @@ export async function resolveMachineWebSocketCandidates(
       // An endpoint the relay policy rejects falls back to wss.
     }
   }
+  // An SSH machine's forward, which the app keeps open (ssh-machines.ts).
+  const ssh = machine.routes.find((route) => route.type === "ssh");
+  if (ssh?.type === "ssh") {
+    candidates.push(
+      Object.freeze({
+        routeType: "ssh",
+        url: withPath(`ws://127.0.0.1:${ssh.localPort}`, path),
+      }),
+    );
+  }
   const wss =
-    machine.routes.find((route) => route.type === "wss")?.url ?? machine.url;
+    machine.routes.find((route) => route.type === "wss")?.url ??
+    (ssh ? "" : machine.url);
   if (wss) {
     candidates.push(
       Object.freeze({ routeType: "wss", url: withPath(wss, path) }),

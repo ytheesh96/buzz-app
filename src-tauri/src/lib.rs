@@ -16,6 +16,7 @@ mod qr;
 #[cfg(unix)]
 mod quit_signal;
 mod sharing;
+mod ssh_machines;
 use browser::{
     browser_action, browser_attach, browser_detach, browser_navigate, browser_set_bounds,
     browser_set_media_suspended, browser_status,
@@ -762,6 +763,11 @@ fn commands<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Sen
         iroh_tunnel::iroh_tunnel_available,
         iroh_tunnel::iroh_tunnel_endpoint,
         iroh_tunnel::iroh_tunnel_disconnect,
+        ssh_machines::ssh_config_hosts,
+        ssh_machines::ssh_machine_setup,
+        ssh_machines::ssh_tunnel_open,
+        ssh_machines::ssh_tunnel_close,
+        ssh_machines::ssh_tunnel_states,
         sharing::share_image,
         identity_restore,
         identity_import,
@@ -1285,6 +1291,7 @@ pub fn run() {
         .manage(mesh_compute::identity(identity.clone()))
         .manage(MeshHost::default())
         .manage(iroh_tunnel::IrohTunnelManager::default())
+        .manage(ssh_machines::SshTunnels::default())
         .manage(keep_awake::KeepAwake::default())
         .manage(identity)
         .manage(archive::ArchiveHost::default())
@@ -1443,6 +1450,7 @@ pub(crate) fn shut_down<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     host_command::stop_login_shell_probe();
     app.state::<HostMcpServers>().stop_all();
     app.state::<HostForward>().stop_all();
+    app.state::<ssh_machines::SshTunnels>().stop_all();
     browser::shutdown();
     if let Err(error) = app.state::<Terminals>().shutdown() {
         eprintln!("Terminal shutdown failed: {error}");

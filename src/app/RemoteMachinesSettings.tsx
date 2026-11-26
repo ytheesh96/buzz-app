@@ -25,10 +25,15 @@ import {
   type RemoteMachineStatus,
   refreshRemoteMachine,
   removeRemoteMachine,
+  sshRoute,
   updateRemoteMachine,
   useRemoteMachineStatuses,
   useRemoteMachines,
 } from "../features/agents/remote-machines";
+import {
+  type SshTunnelState,
+  useSshTunnelStates,
+} from "../features/agents/ssh-machines";
 import {
   ArrowsClockwiseIcon,
   CloudIcon,
@@ -47,12 +52,16 @@ import { IconButton } from "../shared/design-system/ui/IconButton";
 import { Input } from "../shared/design-system/ui/Input";
 import { PreferenceRow } from "../shared/design-system/ui/PreferenceRow";
 import { SettingsGroup } from "../shared/design-system/ui/SettingsGroup";
+import { Tabs } from "../shared/design-system/ui/Tabs";
+import { SshMachineForm } from "./SshMachineForm";
 
 function hasIrohRoute(machine: RemoteMachine | undefined): boolean {
   return Boolean(machine?.routes.some((route) => route.type === "iroh"));
 }
 
 function hostLabel(machine: RemoteMachine): string {
+  const ssh = sshRoute(machine);
+  if (ssh) return ssh.target;
   if (machine.host) return machine.host;
   const wssUrl = primaryWssUrl(machine);
   if (wssUrl) {
@@ -67,17 +76,133 @@ function hostLabel(machine: RemoteMachine): string {
   return iroh.nodeId.length > 12 ? `${iroh.nodeId.slice(0, 12)}…` : iroh.nodeId;
 }
 
+const ROUTE_BADGES = { iroh: "Iroh", ssh: "SSH", wss: "WSS" } as const;
+
 function routeBadgesFor(
   machine: RemoteMachine,
   status: RemoteMachineStatus | undefined,
-): readonly ("Iroh" | "WSS")[] {
+): readonly string[] {
   if (status?.state === "online" && status.activeRoute) {
-    return [status.activeRoute === "iroh" ? "Iroh" : "WSS"];
+    return [ROUTE_BADGES[status.activeRoute]];
   }
-  const badges: ("Iroh" | "WSS")[] = [];
-  if (hasIrohRoute(machine)) badges.push("Iroh");
-  if (primaryWssUrl(machine)) badges.push("WSS");
+  const badges: string[] = [];
+  if (hasIrohRoute(machine)) badges.push(ROUTE_BADGES.iroh);
+  if (sshRoute(machine)) badges.push(ROUTE_BADGES.ssh);
+  if (primaryWssUrl(machine)) badges.push(ROUTE_BADGES.wss);
   return badges;
+}
+
+function tunnelLabel(tunnel: SshTunnelState | undefined): string | undefined {
+  if (tunnel?.state === "connecting") return "Connecting over SSH…";
+  if (tunnel?.state !== "reconnecting") return undefined;
+  return tunnel.error
+    ? `SSH reconnecting · ${tunnel.error}`
+    : "SSH reconnecting…";
+}
+
+type AddMethod = "link" | "ssh";
+
+/** Add a machine by pairing link or over SSH. */
+function AddMachineForm({
+  inputRef,
+  onCancel,
+  onSaved,
+  onPendingChange,
+}: {
+  inputRef: RefObject<HTMLInputElement | null>;
+  onCancel(): void;
+  onSaved(machine: RemoteMachine): void;
+  onPendingChange?: ((pending: boolean) => void) | undefined;
+}) {
+  const [method, setMethod] = useState<AddMethod>("link");
+  const [pending, setPending] = useState(false);
+  const track = (next: boolean) => {
+    setPending(next);
+    onPendingChange?.(next);
+  };
+  return (
+    <Tabs<AddMethod>
+      label="Connect with"
+      variant="segmented"
+      size="sm"
+      value={method}
+      items={[
+        { value: "link", label: "Pairing link", disabled: pending },
+        { value: "ssh", label: "SSH", disabled: pending },
+      ]}
+      onValueChange={setMethod}
+      renderPanel={(value) =>
+        value === "ssh" ? (
+          <SshMachineForm
+            targetInputRef={inputRef}
+            onCancel={onCancel}
+            onSaved={onSaved}
+            onPendingChange={track}
+          />
+        ) : (
+          <MachineEditorForm
+            urlInputRef={inputRef}
+            onCancel={onCancel}
+            onSaved={onSaved}
+            onPendingChange={track}
+          />
+        )
+      }
+    />
+  );
+}
+
+/** Add, or edit with the form that matches how the machine connects. */
+function MachineForm({
+  machine,
+  inputRef,
+  onCancel,
+  onSaved,
+  onPendingChange,
+}: {
+  machine?: RemoteMachine | undefined;
+  inputRef: RefObject<HTMLInputElement | null>;
+  onCancel(): void;
+  onSaved(machine: RemoteMachine): void;
+  onPendingChange?: ((pending: boolean) => void) | undefined;
+}) {
+  if (!machine)
+    return (
+      <AddMachineForm
+        inputRef={inputRef}
+        onCancel={onCancel}
+        onSaved={onSaved}
+        onPendingChange={onPendingChange}
+      />
+    );
+  return sshRoute(machine) ? (
+    <SshMachineForm
+      machine={machine}
+      targetInputRef={inputRef}
+      onCancel={onCancel}
+      onSaved={onSaved}
+      onPendingChange={onPendingChange}
+    />
+  ) : (
+    <MachineEditorForm
+      machine={machine}
+      urlInputRef={inputRef}
+      onCancel={onCancel}
+      onSaved={onSaved}
+      onPendingChange={onPendingChange}
+    />
+  );
+}
+
+/** The add/edit header's supporting text. */
+function formSubtitle(machine: RemoteMachine | undefined): string {
+  if (machine && sshRoute(machine))
+    return "Buzz reaches this machine through an SSH tunnel. Set it up again to restart or upgrade buzz-host there.";
+  if (machine && hasIrohRoute(machine) && !primaryWssUrl(machine))
+    return "This machine connects over Iroh. Optionally add a wss:// fallback URL or update its access token.";
+  if (machine)
+    return "Paste the pairing link from your machine, or type its server address.";
+  return "Paste the pairing link from your machine, or set up buzz-host on a computer you reach over SSH.";
 }
 
 /** The add/edit machine fields and actions. Actions render into the
@@ -396,20 +521,16 @@ export function MachineEditorDialog({
         if (!next) onClose();
       }}
       title={machine ? `Edit ${machine.name}` : "Add machine"}
-      description={
-        machine && hasIrohRoute(machine) && !primaryWssUrl(machine)
-          ? "This machine connects over Iroh. Optionally add a wss:// fallback URL or update its access token."
-          : "Paste the pairing link from your machine, or type its server address."
-      }
+      description={formSubtitle(machine)}
       size="compact"
       initialFocus={urlInputRef}
       preventClose={pending}
       actions={<div ref={setFooter} className="contents" />}
     >
       <ProviderDialogFooter value={footer}>
-        <MachineEditorForm
+        <MachineForm
           machine={machine}
-          urlInputRef={urlInputRef}
+          inputRef={urlInputRef}
           onPendingChange={setPending}
           onCancel={() => setOpen(false)}
           onSaved={(saved) => {
@@ -433,6 +554,7 @@ type ManagerView =
 export function RemoteMachinesManager() {
   const machines = useRemoteMachines();
   const statuses = useRemoteMachineStatuses();
+  const tunnels = useSshTunnelStates();
   const [view, setView] = useState<ManagerView>({ kind: "list" });
   const urlInputRef = useRef<HTMLInputElement>(null);
   const removeCancelRef = useRef<HTMLButtonElement>(null);
@@ -470,7 +592,10 @@ export function RemoteMachinesManager() {
     const parts: string[] = [];
     const host = hostLabel(machine);
     if (host) parts.push(host);
-    if (status?.state === "checking") {
+    const tunnel = tunnelLabel(tunnels[machine.id]);
+    if (tunnel) {
+      parts.push(tunnel);
+    } else if (status?.state === "checking") {
       parts.push("Checking…");
     } else if (status?.state === "online") {
       const count = status.agentCount ?? 0;
@@ -605,18 +730,14 @@ export function RemoteMachinesManager() {
             title={
               view.kind === "edit" ? `Edit ${view.machine.name}` : "Add machine"
             }
-            subtitle={
-              view.kind === "edit" &&
-              hasIrohRoute(view.machine) &&
-              !primaryWssUrl(view.machine)
-                ? "This machine connects over Iroh. Optionally add a wss:// fallback URL or update its access token."
-                : "Paste the pairing link from your machine, or type its server address."
-            }
+            subtitle={formSubtitle(
+              view.kind === "edit" ? view.machine : undefined,
+            )}
           />
-          <MachineEditorForm
+          <MachineForm
             key={view.kind === "edit" ? view.machine.id : "add"}
             machine={view.kind === "edit" ? view.machine : undefined}
-            urlInputRef={urlInputRef}
+            inputRef={urlInputRef}
             onCancel={back}
             onSaved={back}
           />

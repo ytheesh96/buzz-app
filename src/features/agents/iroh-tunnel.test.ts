@@ -211,4 +211,38 @@ describe("iroh-tunnel", () => {
       machineId: "m_studio",
     });
   });
+
+  it("uses an SSH machine's forward, joined with a path, and never its url twice", async () => {
+    const ssh = {
+      id: "m_ssh",
+      url: "ws://127.0.0.1:40123",
+      routes: [
+        {
+          type: "ssh" as const,
+          target: "mini",
+          remotePort: 8467,
+          localPort: 40123,
+        },
+      ],
+    };
+    expect(await resolveMachineWebSocketCandidates(ssh)).toEqual([
+      { routeType: "ssh", url: "ws://127.0.0.1:40123" },
+    ]);
+    expect(
+      await resolveMachineWebSocketCandidates(ssh, { path: "/desktop?t=1" }),
+    ).toEqual([{ routeType: "ssh", url: "ws://127.0.0.1:40123/desktop?t=1" }]);
+    // A discovered wss route stays a fallback after the forward.
+    expect(
+      await resolveMachineWebSocketCandidates({
+        ...ssh,
+        routes: [
+          ...ssh.routes,
+          { type: "wss" as const, url: "wss://mini.example.org/_buzz-host" },
+        ],
+      }),
+    ).toEqual([
+      { routeType: "ssh", url: "ws://127.0.0.1:40123" },
+      { routeType: "wss", url: "wss://mini.example.org/_buzz-host" },
+    ]);
+  });
 });

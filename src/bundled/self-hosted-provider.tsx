@@ -16,6 +16,7 @@ import {
   subscribeRemoteMachineStatuses,
 } from "../features/agents/remote-machines";
 import { startRemoteMachineDiscovery } from "../features/agents/remote-machine-discovery";
+import { startSshTunnelSupervision } from "../features/agents/ssh-machines";
 import type { PluginModule } from "../plugins/api";
 import { CloudIcon } from "../shared/design-system/icons";
 
@@ -110,6 +111,7 @@ export function withSelfHostedProvider(module: PluginModule): PluginModule {
   return {
     ...module,
     apply(ctx) {
+      ctx.effect(startSshTunnelSupervision);
       ctx.effect(() =>
         startRemoteMachineDiscovery({
           relay: ctx.reflect.get("relay"),
