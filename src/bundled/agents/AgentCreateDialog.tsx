@@ -1019,7 +1019,7 @@ export function AgentCreateDialog({
                   <PreferenceRow
                     icon={<CloudIcon size={20} aria-hidden="true" />}
                     title="No remote machine added"
-                    subtitle="Paste a buzz-host pairing link or server URL to run agents on another Linux or Mac computer."
+                    subtitle="Paste a pairing link or server address to run agents on another Linux or Mac computer."
                     trailing={
                       <Button
                         type="button"
