@@ -25,6 +25,16 @@
   min-width: 0;
 }
 
+.folderActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.folderActions > .repositoryInput {
+  flex: 1 1 16rem;
+}
+
 /* About three folder cards (one 4rem card each), then the list scrolls
    instead of the dialog growing; the half card hints that more follow. */
 .folderList {

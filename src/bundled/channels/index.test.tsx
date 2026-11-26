@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { apply } from "./index";
 
 vi.mock("./canvas-panel", () => ({ registerCanvas: () => {} }));
+vi.mock("./remote-files-panel", () => ({ registerRemoteFiles: () => {} }));
 
 afterEach(() => {
   document.body.innerHTML = "";

@@ -7,13 +7,45 @@ import userEvent from "@testing-library/user-event";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { WorkspaceFields } from "./WorkspaceFields";
 import type { Workspace } from "./workspace";
+import {
+  addRemoteMachine,
+  resetRemoteMachinesCache,
+} from "../agents/remote-machines";
+
+vi.mock("./InlineRemoteFolderBrowser", () => ({
+  InlineRemoteFolderBrowser: ({
+    label,
+    onSelect,
+    onClose,
+  }: {
+    label?: string;
+    onSelect(path: string): void;
+    onClose(): void;
+  }) => (
+    <section aria-label={label}>
+      <button type="button" onClick={() => onSelect("~/remote/project")}>
+        Pick remote folder
+      </button>
+      <button type="button" onClick={onClose}>
+        Close remote browser
+      </button>
+    </section>
+  ),
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: vi.fn(),
   invoke: vi.fn(),
 }));
-beforeEach(() => vi.mocked(isTauri).mockReturnValue(true));
+beforeEach(() => {
+  vi.mocked(isTauri).mockReturnValue(true);
+  localStorage.clear();
+  resetRemoteMachinesCache();
+});
 afterEach(() => {
   cleanup();
+  localStorage.clear();
+  resetRemoteMachinesCache();
   vi.resetAllMocks();
 });
 function Form({ folders = ["~/original"] }: { folders?: string[] }) {
@@ -137,4 +169,67 @@ it("keeps the requirement after picker cancellation and preserves picker failure
   await user.click(add);
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.getByRole("button", { name: "Remove chosen" })).toBeVisible();
+});
+
+it("offers remote browsing once a machine is configured, guests included", () => {
+  const { unmount } = render(<Form />);
+  expect(screen.queryByRole("button", { name: "Browse remote…" })).toBeNull();
+  unmount();
+  addRemoteMachine({
+    name: "Guest Box",
+    url: "wss://guest.example.org/_buzz-host",
+    role: "guest",
+  });
+  render(<Form />);
+  expect(screen.getByRole("button", { name: "Browse remote…" })).toBeVisible();
+});
+
+it("adds a folder from the inline browser and keeps it open for more folders", async () => {
+  addRemoteMachine({
+    name: "Studio",
+    url: "wss://studio.example.org/_buzz-host",
+  });
+  render(<Form folders={[]} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Browse remote…" }));
+  const browser = screen.getByRole("region", {
+    name: "Choose a remote folder",
+  });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Pick remote folder" }));
+  expect(screen.getByRole("button", { name: "Remove project" })).toBeVisible();
+  expect(screen.getByText("~/remote/project")).toBeVisible();
+  // Folders keep the browser open so several can be added in a row.
+  expect(browser).toBeVisible();
+  await user.click(
+    screen.getByRole("button", { name: "Close remote browser" }),
+  );
+  expect(screen.queryByRole("region")).toBeNull();
+});
+
+it("sets the worktree location from the inline browser and closes it", async () => {
+  addRemoteMachine({
+    name: "Studio",
+    url: "wss://studio.example.org/_buzz-host",
+  });
+  render(<Form />);
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("button", { name: "Worktree location: ~/worktrees" }),
+  );
+  expect(
+    await screen.findByRole("menuitem", { name: "This computer" }),
+  ).toBeVisible();
+  await user.click(screen.getByRole("menuitem", { name: "Studio" }));
+  expect(
+    screen.getByRole("region", { name: "Choose a worktree location" }),
+  ).toBeVisible();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Pick remote folder" }));
+  expect(
+    screen.getByRole("button", {
+      name: "Worktree location: ~/remote/project",
+    }),
+  ).toBeVisible();
+  expect(screen.queryByRole("region")).toBeNull();
 });

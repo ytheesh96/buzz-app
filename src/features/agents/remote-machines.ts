@@ -24,6 +24,13 @@ export type RemoteMachineSource = "manual" | "discovered";
 export type RemoteMachineCapabilities = Readonly<{
   desktop?: boolean;
   docker?: boolean;
+  /** buzz-host can list and read files over `fs.list`/`fs.read`. Older hosts
+   * omit it, so absence is not proof the capability is missing. */
+  fs?: boolean;
+  /** buzz-host can create, write, rename, and delete entries over
+   * `fs.write`/`fs.mkdir`/`fs.rename`/`fs.delete`. Older hosts omit it, so
+   * absence is not proof the capability is missing. */
+  fsWrite?: boolean;
 }>;
 
 export type RemoteMachine = Readonly<{
@@ -225,10 +232,20 @@ function normalizeCapabilities(
   const item = raw as Record<string, unknown>;
   const desktop = typeof item.desktop === "boolean" ? item.desktop : undefined;
   const docker = typeof item.docker === "boolean" ? item.docker : undefined;
-  if (desktop === undefined && docker === undefined) return undefined;
+  const fs = typeof item.fs === "boolean" ? item.fs : undefined;
+  const fsWrite = typeof item.fsWrite === "boolean" ? item.fsWrite : undefined;
+  if (
+    desktop === undefined &&
+    docker === undefined &&
+    fs === undefined &&
+    fsWrite === undefined
+  )
+    return undefined;
   return Object.freeze({
     ...(desktop !== undefined ? { desktop } : {}),
     ...(docker !== undefined ? { docker } : {}),
+    ...(fs !== undefined ? { fs } : {}),
+    ...(fsWrite !== undefined ? { fsWrite } : {}),
   });
 }
 
