@@ -27,7 +27,7 @@ import {
 } from "../agents/remote-machines";
 import { browsableRemoteMachines } from "../agents/remote-fs";
 import type { Workspace } from "./workspace";
-import { RemoteFolderPickerDialog } from "./RemoteFolderPickerDialog";
+import { InlineRemoteFolderBrowser } from "./InlineRemoteFolderBrowser";
 import styles from "./WorkspaceSettings.module.css";
 
 const MAX_FOLDERS = 20;
@@ -54,7 +54,7 @@ export function WorkspaceFields({
   const [picking, setPicking] = useState(false);
   const [error, setError] = useState("");
   const [typed, setTyped] = useState("");
-  const [remotePicker, setRemotePicker] = useState<{
+  const [remoteBrowser, setRemoteBrowser] = useState<{
     target: "folder" | "worktree";
     machineId?: string | undefined;
     start?: string | undefined;
@@ -152,8 +152,13 @@ export function WorkspaceFields({
   };
   const openRemote = (target: "folder" | "worktree", machineId?: string) => {
     setError("");
+    if (remoteBrowser?.target === target) {
+      setRemoteBrowser(null);
+      focusAfter.current = target === "worktree" ? "location" : "add";
+      return;
+    }
     const latest = current.current.value;
-    setRemotePicker({
+    setRemoteBrowser({
       target,
       ...(machineId ? { machineId } : {}),
       ...(target === "worktree" && latest.worktree
@@ -162,9 +167,10 @@ export function WorkspaceFields({
     });
   };
   const selectRemote = (path: string) => {
-    const picker = remotePicker;
+    const picker = remoteBrowser;
     if (!picker) return;
     if (picker.target === "folder") {
+      // Keep the browser open so several folders can be added in a row.
       attach(path);
       return;
     }
@@ -174,6 +180,8 @@ export function WorkspaceFields({
       ...latest,
       worktree: { ...latest.worktree, location: path },
     });
+    setRemoteBrowser(null);
+    focusAfter.current = "location";
   };
   const remove = (index: number) => {
     const next = folders.filter((_, item) => item !== index);
@@ -306,6 +314,18 @@ export function WorkspaceFields({
               )}
             </div>
           )}
+          {remoteBrowser?.target === "folder" && (
+            <InlineRemoteFolderBrowser
+              machines={browsable}
+              initialMachineId={remoteBrowser.machineId}
+              label="Choose a remote folder"
+              onSelect={selectRemote}
+              onClose={() => {
+                setRemoteBrowser(null);
+                focusAfter.current = "add";
+              }}
+            />
+          )}
         </Field>
         <Switch
           disabled={disabled}
@@ -394,6 +414,19 @@ export function WorkspaceFields({
                 )}
               </Field>
             )}
+            {remoteBrowser?.target === "worktree" && (
+              <InlineRemoteFolderBrowser
+                machines={browsable}
+                initialMachineId={remoteBrowser.machineId}
+                initialPath={remoteBrowser.start}
+                label="Choose a worktree location"
+                onSelect={selectRemote}
+                onClose={() => {
+                  setRemoteBrowser(null);
+                  focusAfter.current = "location";
+                }}
+              />
+            )}
             <Field label="Base branch">
               <Input
                 disabled={disabled}
@@ -409,22 +442,6 @@ export function WorkspaceFields({
           </div>
         )}
       </div>
-      <RemoteFolderPickerDialog
-        open={remotePicker !== null}
-        onOpenChange={(open) => {
-          if (!open) setRemotePicker(null);
-        }}
-        machines={browsable}
-        initialMachineId={remotePicker?.machineId}
-        initialPath={remotePicker?.start}
-        finalFocus={remotePicker?.target === "worktree" ? location : add}
-        title={
-          remotePicker?.target === "worktree"
-            ? "Choose a worktree location"
-            : "Choose a folder"
-        }
-        onSelect={selectRemote}
-      />
     </div>
   );
 }

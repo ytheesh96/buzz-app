@@ -11,6 +11,7 @@ import type {
   ChannelLauncherProps,
   PanelProps,
 } from "../../features/panels/service";
+import { usePanelTabTitle } from "../../features/panels/PanelWorkspace";
 import {
   activeMachineIdSnapshot,
   useRemoteAgentHosts,
@@ -20,19 +21,30 @@ import {
 } from "../../features/agents/remote-machines";
 import {
   browsableRemoteMachines,
+  cleanRemoteFsErrorMessage,
+  deleteRemoteEntry,
+  isRemoteFsAlreadyExists,
+  isRemoteFsConflict,
   isRemoteFsUnsupported,
+  joinRemotePath,
   listRemoteDirectory,
+  mkdirRemoteDirectory,
   readRemoteFile,
   REMOTE_FS_UNSUPPORTED_MESSAGE,
   remotePathCrumbs,
+  renameRemoteEntry,
+  writeRemoteFile,
   type RemoteFsEntry,
   type RemoteFsListResult,
   type RemoteFsReadResult,
 } from "../../features/agents/remote-fs";
 import {
   readWorkspace,
+  workspaceCanvas,
   workspaceDirectories,
 } from "../../features/solo/workspace";
+import { useListedChannel } from "../../features/relay/listed-channel";
+import { canvasReadOnly } from "../../features/channel-templates/capability";
 import {
   MarkdownDocument,
   MarkdownSource,
@@ -47,9 +59,11 @@ import {
   ArrowsClockwiseIcon,
   CaretRightIcon,
   CopyIcon,
+  DotsThreeVerticalIcon,
   FileCodeIcon,
   FileTextIcon,
   FolderOpenIcon,
+  FolderPlusIcon,
   FolderSimpleIcon,
   GitBranchIcon,
   ImageIcon,
@@ -61,8 +75,15 @@ import { Button } from "../../shared/design-system/ui/Button";
 import { EmptyState } from "../../shared/design-system/ui/EmptyState";
 import { IconButton } from "../../shared/design-system/ui/IconButton";
 import { Input } from "../../shared/design-system/ui/Input";
+import {
+  MenuItem,
+  MenuPopup,
+  MenuRoot,
+  MenuTrigger,
+} from "../../shared/design-system/ui/Menu";
 import { Select } from "../../shared/design-system/ui/Select";
 import { Switch } from "../../shared/design-system/ui/Switch";
+import { Textarea } from "../../shared/design-system/ui/Textarea";
 import { useToastNotification } from "../../shared/design-system/ui/Toast";
 import { writeClipboardText } from "../../shared/clipboard";
 import styles from "./RemoteFilesPanel.module.css";
@@ -75,8 +96,11 @@ type Listing = Readonly<{
   truncated: boolean;
 }>;
 
+type CanvasHead = Readonly<{ id?: string; content: string }>;
+
 const FILES_TARGET = "buzz.files";
 const MAX_PREVIEW_LINES = 4_000;
+const MAX_WORKSPACE_FOLDERS = 20;
 
 function message(reason: unknown) {
   return reason instanceof Error ? reason.message : String(reason);
@@ -84,6 +108,17 @@ function message(reason: unknown) {
 
 function isDirectory(entry: RemoteFsEntry) {
   return entry.kind === "dir" || entry.targetKind === "dir";
+}
+
+/** Files this panel may edit: text, complete, and within the read budget. */
+function isEditable(result: RemoteFsReadResult | undefined): boolean {
+  return (
+    !!result &&
+    !result.isBinary &&
+    !result.isImage &&
+    !result.truncated &&
+    result.content !== null
+  );
 }
 
 function formatSize(bytes: number): string {
@@ -145,6 +180,20 @@ function FilePreview({
   loading,
   error,
   unsupported,
+  editing,
+  draft,
+  dirty,
+  saving,
+  saveError,
+  conflict,
+  discardGuard,
+  onToggleEdit,
+  onDraftChange,
+  onSave,
+  onReloadFromDisk,
+  onDiscard,
+  onKeepEditing,
+  onDiscardGuard,
   onRetry,
   onClose,
 }: {
@@ -153,6 +202,20 @@ function FilePreview({
   loading: boolean;
   error: string;
   unsupported: boolean;
+  editing: boolean;
+  draft: string;
+  dirty: boolean;
+  saving: boolean;
+  saveError: string;
+  conflict: boolean;
+  discardGuard: { kind: "open" | "close"; name: string } | undefined;
+  onToggleEdit(): void;
+  onDraftChange(value: string): void;
+  onSave(overwrite: boolean): void;
+  onReloadFromDisk(): void;
+  onDiscard(): void;
+  onKeepEditing(): void;
+  onDiscardGuard(): void;
   onRetry(): void;
   onClose(): void;
 }) {
@@ -160,13 +223,14 @@ function FilePreview({
   const notify = useToastNotification();
   const name = entry.name;
   const markdown = /\.mdx?$/i.test(name);
+  const editable = isEditable(result);
+  const content = result?.content ?? "";
   const copy = (value: string, label: string) => {
     void writeClipboardText(value).then(
       () => notify(`${label} copied`, "success"),
       () => notify(`Couldn't copy ${label.toLowerCase()}`, "error"),
     );
   };
-  const content = result?.content ?? "";
   return (
     <div className={styles.preview}>
       <header className={styles.previewHeader}>
@@ -177,10 +241,47 @@ function FilePreview({
           <span className={styles.path}>{entry.displayPath}</span>
         </div>
         <div className={styles.previewActions}>
+          {editing && dirty && (
+            <Badge>
+              <span>Unsaved changes</span>
+            </Badge>
+          )}
+          {editable && !editing && (
+            <Button variant="subtle" size="sm" onClick={onToggleEdit}>
+              Edit
+            </Button>
+          )}
+          {editable && editing && (
+            <Button variant="subtle" size="sm" onClick={onToggleEdit}>
+              {markdown ? "Preview" : "View"}
+            </Button>
+          )}
+          {editing && (
+            <>
+              <Button
+                variant="prominent"
+                size="sm"
+                loading={saving}
+                disabled={!dirty || saving || conflict}
+                onClick={() => onSave(false)}
+              >
+                Save
+              </Button>
+              <Button
+                variant="subtle"
+                size="sm"
+                disabled={saving}
+                onClick={onDiscard}
+              >
+                Discard
+              </Button>
+            </>
+          )}
           {markdown &&
             result &&
             !result.isBinary &&
-            result.content !== null && (
+            result.content !== null &&
+            !editing && (
               <Button
                 variant="subtle"
                 size="sm"
@@ -205,7 +306,7 @@ function FilePreview({
             title="Copy contents"
             icon={<FileTextIcon size={16} aria-hidden="true" />}
             disabled={!result?.content}
-            onClick={() => copy(content, "Contents")}
+            onClick={() => copy(editing ? draft : content, "Contents")}
           />
           <IconButton
             variant="ghost"
@@ -217,6 +318,22 @@ function FilePreview({
           />
         </div>
       </header>
+      {discardGuard && dirty && (
+        <div role="alert" className={styles.guard}>
+          <span>
+            You have unsaved changes to {discardGuard.name}.
+            {discardGuard.kind === "open"
+              ? " Opening another file discards them."
+              : ""}
+          </span>
+          <Button variant="outline" size="sm" onClick={onKeepEditing}>
+            Keep editing
+          </Button>
+          <Button variant="destructive" size="sm" onClick={onDiscardGuard}>
+            Discard changes
+          </Button>
+        </div>
+      )}
       <div className={styles.previewBody}>
         {loading && (
           <p role="status" className={styles.status}>
@@ -245,11 +362,61 @@ function FilePreview({
         )}
         {result?.truncated && (
           <p className={styles.status}>
-            This file is larger than the preview limit, so only the beginning is
-            shown.
+            This file is larger than the edit size limit, so it is read-only
+            here. Only the beginning is shown.
           </p>
         )}
-        {result &&
+        {editing && result && !result.isBinary && result.content !== null && (
+          <div className={styles.editor}>
+            {conflict && (
+              <div role="alert" className={styles.conflict}>
+                <span>
+                  This file changed on disk since it was loaded. Save your
+                  changes elsewhere, or resolve the conflict.
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={saving}
+                  onClick={onReloadFromDisk}
+                >
+                  Reload from disk
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  disabled={saving}
+                  onClick={() => onSave(true)}
+                >
+                  Overwrite anyway
+                </Button>
+              </div>
+            )}
+            {saveError && (
+              <p role="alert" className={styles.danger}>
+                {saveError}
+              </p>
+            )}
+            <Textarea
+              aria-label={`Edit ${entry.name}`}
+              variant="code"
+              rows={16}
+              value={draft}
+              onChange={(event) => onDraftChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  (event.metaKey || event.ctrlKey) &&
+                  event.key.toLowerCase() === "s"
+                ) {
+                  event.preventDefault();
+                  if (dirty && !saving && !conflict) onSave(false);
+                }
+              }}
+            />
+          </div>
+        )}
+        {!editing &&
+          result &&
           !error &&
           (result.isImage && result.encoding === "base64" && content ? (
             <img
@@ -284,6 +451,9 @@ function FilePreview({
   );
 }
 
+// One element keeps the tab identity stable across renders.
+const tabIcon = <FolderOpenIcon size="1rem" />;
+
 export function registerRemoteFiles(ctx: Context) {
   function Launcher({ toggle, pressed }: ChannelLauncherProps) {
     const machines = useRemoteMachines();
@@ -305,6 +475,7 @@ export function registerRemoteFiles(ctx: Context) {
   }
 
   function Panel({ channelContext }: PanelProps) {
+    usePanelTabTitle("Files", tabIcon);
     const state = useSyncExternalStore(ctx.relay.subscribe, ctx.relay.snapshot);
     const machines = useRemoteMachines();
     const statuses = useRemoteMachineStatuses();
@@ -320,6 +491,11 @@ export function registerRemoteFiles(ctx: Context) {
       .list()
       .channels.find(({ id }) => id === channelId);
     const membersKey = channel?.members?.join(",") ?? "";
+    const canvasWritable = !useListedChannel(
+      state.status === "ready" ? state.session.channels : undefined,
+      channelId,
+      canvasReadOnly,
+    );
     const [machineId, setMachineId] = useState("");
     const [roots, setRoots] = useState<readonly string[] | undefined>();
     const [root, setRoot] = useState("~");
@@ -338,6 +514,27 @@ export function registerRemoteFiles(ctx: Context) {
     const [previewLoading, setPreviewLoading] = useState(false);
     const [previewError, setPreviewError] = useState("");
     const [previewUnsupported, setPreviewUnsupported] = useState(false);
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState("");
+    const [conflict, setConflict] = useState(false);
+    const [discardGuard, setDiscardGuard] = useState<
+      { kind: "open"; entry: RemoteFsEntry } | { kind: "close" } | undefined
+    >();
+    const [createKind, setCreateKind] = useState<"file" | "folder">();
+    const [createName, setCreateName] = useState("");
+    const [creating, setCreating] = useState(false);
+    const [createError, setCreateError] = useState("");
+    const [renaming, setRenaming] = useState<string | undefined>();
+    const [renameDraft, setRenameDraft] = useState("");
+    const [renameBusy, setRenameBusy] = useState(false);
+    const [renameError, setRenameError] = useState("");
+    const [deleting, setDeleting] = useState<string | undefined>();
+    const [deleteBusy, setDeleteBusy] = useState(false);
+    const [deleteError, setDeleteError] = useState("");
+    const [addingFolder, setAddingFolder] = useState(false);
+    const [addFolderError, setAddFolderError] = useState("");
     const request = useRef(0);
     const abort = useRef<AbortController | undefined>(undefined);
     const previewRequest = useRef(0);
@@ -351,6 +548,15 @@ export function registerRemoteFiles(ctx: Context) {
     machineRef.current = machine;
     const showHiddenRef = useRef(showHidden);
     showHiddenRef.current = showHidden;
+    const sessionRef = useRef(session);
+    sessionRef.current = session;
+    const [canvasHead, setCanvasHead] = useState<CanvasHead | undefined>();
+    const canvasHeadRef = useRef<CanvasHead | undefined>(canvasHead);
+    canvasHeadRef.current = canvasHead;
+    const rootsRef = useRef<readonly string[] | undefined>(roots);
+    rootsRef.current = roots;
+
+    const dirty = editing && draft !== (previewResult?.content ?? "");
 
     useEffect(() => {
       setMachineId((current) => {
@@ -375,7 +581,11 @@ export function registerRemoteFiles(ctx: Context) {
       let alive = true;
       void session.canvas.read(channelId).then(
         (head) => {
-          if (alive) setRoots(folderFor(head?.content ?? ""));
+          if (!alive) return;
+          setCanvasHead(
+            head ? { id: head.id, content: head.content } : undefined,
+          );
+          setRoots(folderFor(head?.content ?? ""));
         },
         () => {
           if (alive) setRoots([]);
@@ -404,6 +614,11 @@ export function registerRemoteFiles(ctx: Context) {
         setPreviewError("");
         setPreviewUnsupported(false);
         setPreviewLoading(false);
+        setEditing(false);
+        setDraft("");
+        setSaveError("");
+        setConflict(false);
+        setDiscardGuard(undefined);
       }
       try {
         const result: RemoteFsListResult = await listRemoteDirectory(
@@ -437,12 +652,15 @@ export function registerRemoteFiles(ctx: Context) {
 
     // Start at the chat's first workspace folder, or home when it has none.
     // Waiting for the Canvas read avoids loading home first, then the folder.
+    // Keyed on whether the Canvas has been read, not its contents, so adding a
+    // folder to the workspace does not navigate away from the current listing.
+    const rootsReady = roots !== undefined;
     useEffect(() => {
-      if (!machine || !roots) return;
-      const start = roots[0] ?? "~";
+      if (!machine || !rootsReady) return;
+      const start = rootsRef.current?.[0] ?? "~";
       setRoot(start);
       void load(start);
-    }, [machine, roots, load]);
+    }, [machine, rootsReady, load]);
 
     const lastShowHidden = useRef(showHidden);
     useEffect(() => {
@@ -461,18 +679,54 @@ export function registerRemoteFiles(ctx: Context) {
       [],
     );
 
-    const openFile = (entry: RemoteFsEntry) => {
+    const clearPreview = () => {
+      previewRequest.current += 1;
+      previewAbort.current?.abort();
+      setPreviewEntry(undefined);
+      setPreviewResult(undefined);
+      setPreviewError("");
+      setPreviewUnsupported(false);
+      setPreviewLoading(false);
+      setEditing(false);
+      setDraft("");
+      setSaving(false);
+      setSaveError("");
+      setConflict(false);
+      setDiscardGuard(undefined);
+    };
+
+    const openFile = (
+      entry: RemoteFsEntry,
+      keepEditing = false,
+      force = false,
+    ) => {
+      // Clicking the open file while a draft is dirty keeps the draft.
+      if (!force && dirty && previewEntry?.path === entry.path) return;
+      if (
+        !force &&
+        !keepEditing &&
+        dirty &&
+        previewEntry?.path !== entry.path
+      ) {
+        setDiscardGuard({ kind: "open", entry });
+        return;
+      }
       const target = machineRef.current;
       if (!target) return;
       const generation = ++previewRequest.current;
       previewAbort.current?.abort();
       const controller = new AbortController();
       previewAbort.current = controller;
+      setDiscardGuard(undefined);
       setPreviewEntry(entry);
       setPreviewResult(undefined);
       setPreviewError("");
       setPreviewUnsupported(false);
       setPreviewLoading(true);
+      setEditing(false);
+      setDraft("");
+      setSaveError("");
+      setConflict(false);
       void readRemoteFile(
         target,
         { path: entry.path },
@@ -482,6 +736,8 @@ export function registerRemoteFiles(ctx: Context) {
           if (generation !== previewRequest.current) return;
           setPreviewResult(result);
           setPreviewLoading(false);
+          setDraft(result.content ?? "");
+          setEditing(keepEditing && isEditable(result));
         },
         (reason) => {
           if (generation !== previewRequest.current) return;
@@ -497,9 +753,229 @@ export function registerRemoteFiles(ctx: Context) {
       if (previewEntry) openFile(previewEntry);
     };
 
+    const closePreview = () => {
+      if (dirty) {
+        setDiscardGuard({ kind: "close" });
+        return;
+      }
+      clearPreview();
+    };
+
+    const discardChanges = () => {
+      const pending = discardGuard;
+      setEditing(false);
+      setDraft("");
+      setConflict(false);
+      setSaveError("");
+      setDiscardGuard(undefined);
+      if (pending?.kind === "close") clearPreview();
+      else if (pending?.kind === "open") openFile(pending.entry, false, true);
+    };
+
+    const saveFile = async (overwrite = false) => {
+      const target = machineRef.current;
+      const result = previewResult;
+      if (!target || !result) return;
+      setSaving(true);
+      setSaveError("");
+      setConflict(false);
+      try {
+        const written = await writeRemoteFile(target, {
+          path: result.path,
+          content: draft,
+          ...(!overwrite && result.mtimeMs
+            ? { expectedMtimeMs: result.mtimeMs }
+            : {}),
+        });
+        setPreviewResult({
+          ...result,
+          content: draft,
+          mtimeMs: written.mtimeMs,
+          size: written.size,
+        });
+        setDraft(draft);
+        notify("Saved", "success");
+      } catch (reason) {
+        if (reason instanceof Error && reason.name === "AbortError") return;
+        if (isRemoteFsConflict(reason)) setConflict(true);
+        else setSaveError(message(reason));
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    const reloadFromDisk = () => {
+      if (previewEntry) openFile(previewEntry, true, true);
+    };
+
     const navigate = (path: string) => {
       if (!path.trim()) return;
       void load(path.trim());
+    };
+
+    const createEntry = async () => {
+      const target = machineRef.current;
+      const current = listing;
+      const name = createName.trim();
+      if (!target || !current || !name) return;
+      setCreating(true);
+      setCreateError("");
+      try {
+        if (createKind === "folder") {
+          await mkdirRemoteDirectory(target, {
+            path: joinRemotePath(current.displayPath, name),
+          });
+          notify("Folder created", "success");
+        } else {
+          const created = await writeRemoteFile(target, {
+            path: joinRemotePath(current.path, name),
+            content: "",
+            createOnly: true,
+          });
+          notify("File created", "success");
+          const entry: RemoteFsEntry = Object.freeze({
+            name: created.name,
+            path: created.path,
+            displayPath: created.displayPath,
+            kind: "file",
+            targetKind: null,
+            size: created.size,
+            mtimeMs: created.mtimeMs,
+            hidden: false,
+            isGitRepo: false,
+          });
+          openFile(entry, true);
+        }
+        setCreateKind(undefined);
+        setCreateName("");
+        void load(current.path, true);
+      } catch (reason) {
+        if (reason instanceof Error && reason.name === "AbortError") return;
+        if (isRemoteFsAlreadyExists(reason))
+          setCreateError(
+            cleanRemoteFsErrorMessage(
+              reason instanceof Error ? reason.message : String(reason),
+            ),
+          );
+        else setCreateError(message(reason));
+      } finally {
+        setCreating(false);
+      }
+    };
+
+    const confirmRename = async (entry: RemoteFsEntry) => {
+      const target = machineRef.current;
+      const current = listing;
+      const name = renameDraft.trim();
+      if (!target || !current || !name || name === entry.name) {
+        setRenaming(undefined);
+        setRenameError("");
+        return;
+      }
+      setRenameBusy(true);
+      setRenameError("");
+      try {
+        const renamed = await renameRemoteEntry(target, {
+          from: entry.path,
+          to: joinRemotePath(current.path, name),
+        });
+        setRenaming(undefined);
+        setRenameDraft("");
+        setPreviewEntry((open) =>
+          open?.path === entry.path
+            ? {
+                ...open,
+                name: renamed.name,
+                path: renamed.path,
+                displayPath: renamed.displayPath,
+              }
+            : open,
+        );
+        setPreviewResult((open) =>
+          open?.path === entry.path
+            ? {
+                ...open,
+                name: renamed.name,
+                path: renamed.path,
+                displayPath: renamed.displayPath,
+              }
+            : open,
+        );
+        void load(current.path, true);
+      } catch (reason) {
+        if (reason instanceof Error && reason.name === "AbortError") return;
+        if (isRemoteFsAlreadyExists(reason))
+          setRenameError(
+            cleanRemoteFsErrorMessage(
+              reason instanceof Error ? reason.message : String(reason),
+            ),
+          );
+        else setRenameError(message(reason));
+      } finally {
+        setRenameBusy(false);
+      }
+    };
+
+    const confirmDelete = async (entry: RemoteFsEntry) => {
+      const target = machineRef.current;
+      if (!target) return;
+      setDeleteBusy(true);
+      setDeleteError("");
+      try {
+        await deleteRemoteEntry(target, {
+          path: entry.path,
+          recursive: entry.kind === "dir",
+        });
+        setDeleting(undefined);
+        setPreviewEntry((open) =>
+          open?.path === entry.path ? undefined : open,
+        );
+        if (previewEntry?.path === entry.path) clearPreview();
+        void load(listingRef.current?.path, true);
+      } catch (reason) {
+        if (reason instanceof Error && reason.name === "AbortError") return;
+        setDeleteError(message(reason));
+      } finally {
+        setDeleteBusy(false);
+      }
+    };
+
+    const addFolderToWorkspace = async (path: string) => {
+      const currentSession = sessionRef.current;
+      const head = canvasHeadRef.current;
+      if (!currentSession || !channelId) return;
+      const existing = rootsRef.current ?? [];
+      if (existing.includes(path)) return;
+      if (existing.length >= MAX_WORKSPACE_FOLDERS) {
+        setAddFolderError(
+          `This chat already has the maximum of ${MAX_WORKSPACE_FOLDERS} workspace folders.`,
+        );
+        return;
+      }
+      setAddingFolder(true);
+      setAddFolderError("");
+      try {
+        const workspace = readWorkspace(head?.content ?? "");
+        const content = workspaceCanvas({
+          ...workspace,
+          folders: [...workspace.folders, path],
+        });
+        const event = await currentSession.canvas.save(
+          channelId,
+          content,
+          head?.id,
+        );
+        setCanvasHead({
+          id: event.id,
+          content: event.content,
+        });
+        setRoots(folderFor(event.content));
+        notify(`Added ${path} to chat workspace`, "success");
+      } catch (reason) {
+        setAddFolderError(message(reason));
+      } finally {
+        setAddingFolder(false);
+      }
     };
 
     const folder = filter.trim().toLowerCase();
@@ -535,6 +1011,10 @@ export function registerRemoteFiles(ctx: Context) {
         </div>
       );
     }
+
+    const currentInWorkspace = listing
+      ? (roots ?? []).includes(listing.displayPath)
+      : false;
 
     return (
       <div className={styles.panel}>
@@ -618,30 +1098,53 @@ export function registerRemoteFiles(ctx: Context) {
                   <span className={styles.path}>{machine?.name}</span>
                 )}
               </nav>
-              <IconButton
-                variant="ghost"
-                size="sm"
-                aria-label="Copy path"
-                title="Copy path"
-                icon={<CopyIcon size={16} aria-hidden="true" />}
-                disabled={!listing}
-                onClick={() => {
-                  if (!listing) return;
-                  void writeClipboardText(listing.displayPath).then(
-                    () => notify("Path copied", "success"),
-                    () => notify("Couldn't copy path", "error"),
-                  );
-                }}
-              />
-              <IconButton
-                variant="ghost"
-                size="sm"
-                aria-label="Refresh"
-                title="Refresh"
-                icon={<ArrowsClockwiseIcon size={16} aria-hidden="true" />}
-                disabled={loading}
-                onClick={() => void load(listing?.path, true)}
-              />
+              <div className={styles.toolbarActions}>
+                <IconButton
+                  variant="ghost"
+                  size="sm"
+                  aria-label={
+                    currentInWorkspace
+                      ? "Already in chat workspace"
+                      : "Add this folder to chat workspace"
+                  }
+                  title={
+                    currentInWorkspace
+                      ? "Already in chat workspace"
+                      : "Add this folder to chat workspace"
+                  }
+                  icon={<FolderPlusIcon size={16} aria-hidden="true" />}
+                  disabled={
+                    !listing || loading || currentInWorkspace || !canvasWritable
+                  }
+                  onClick={() => {
+                    if (listing) void addFolderToWorkspace(listing.displayPath);
+                  }}
+                />
+                <IconButton
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Copy path"
+                  title="Copy path"
+                  icon={<CopyIcon size={16} aria-hidden="true" />}
+                  disabled={!listing}
+                  onClick={() => {
+                    if (!listing) return;
+                    void writeClipboardText(listing.displayPath).then(
+                      () => notify("Path copied", "success"),
+                      () => notify("Couldn't copy path", "error"),
+                    );
+                  }}
+                />
+                <IconButton
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Refresh"
+                  title="Refresh"
+                  icon={<ArrowsClockwiseIcon size={16} aria-hidden="true" />}
+                  disabled={loading}
+                  onClick={() => void load(listing?.path, true)}
+                />
+              </div>
             </div>
             <div className={styles.options}>
               <div className={styles.filter}>
@@ -658,7 +1161,102 @@ export function registerRemoteFiles(ctx: Context) {
                 checked={showHidden}
                 onCheckedChange={setShowHidden}
               />
+              <div className={styles.createActions}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-pressed={createKind === "folder"}
+                  disabled={!listing || loading || creating}
+                  onClick={() => {
+                    setCreateKind((kind) =>
+                      kind === "folder" ? undefined : "folder",
+                    );
+                    setCreateName("");
+                    setCreateError("");
+                  }}
+                >
+                  <FolderPlusIcon size={16} aria-hidden="true" />
+                  New folder
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-pressed={createKind === "file"}
+                  disabled={!listing || loading || creating}
+                  onClick={() => {
+                    setCreateKind((kind) =>
+                      kind === "file" ? undefined : "file",
+                    );
+                    setCreateName("");
+                    setCreateError("");
+                  }}
+                >
+                  <FileTextIcon size={16} aria-hidden="true" />
+                  New file
+                </Button>
+              </div>
             </div>
+            {addFolderError && (
+              <p role="alert" className={styles.status}>
+                {addFolderError}
+              </p>
+            )}
+            {createKind && (
+              <div className={styles.createBar}>
+                <Input
+                  aria-label={
+                    createKind === "folder"
+                      ? "New folder name"
+                      : "New file name"
+                  }
+                  controlSize="sm"
+                  autoFocus
+                  value={createName}
+                  placeholder={
+                    createKind === "folder" ? "Folder name" : "File name"
+                  }
+                  disabled={creating}
+                  onChange={(event) => setCreateName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setCreateKind(undefined);
+                      setCreateName("");
+                      setCreateError("");
+                    }
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    void createEntry();
+                  }}
+                />
+                <Button
+                  variant="prominent"
+                  size="sm"
+                  loading={creating}
+                  disabled={!createName.trim()}
+                  onClick={() => void createEntry()}
+                >
+                  Create
+                </Button>
+                <Button
+                  variant="subtle"
+                  size="sm"
+                  disabled={creating}
+                  onClick={() => {
+                    setCreateKind(undefined);
+                    setCreateName("");
+                    setCreateError("");
+                  }}
+                >
+                  Cancel
+                </Button>
+                {createError && (
+                  <span role="alert" className={styles.createError}>
+                    {createError}
+                  </span>
+                )}
+              </div>
+            )}
             {loading && (
               <p role="status" className={styles.status}>
                 Loading files…
@@ -716,42 +1314,184 @@ export function registerRemoteFiles(ctx: Context) {
               {!unsupported &&
                 entries.map((entry) => {
                   const directory = isDirectory(entry);
-                  return (
-                    <Button
-                      key={entry.path}
-                      variant="quiet"
-                      size="row"
-                      aria-current={
-                        previewEntry?.path === entry.path ? "true" : undefined
-                      }
-                      onClick={() =>
-                        directory
-                          ? navigate(entry.displayPath)
-                          : openFile(entry)
-                      }
-                      title={entry.displayPath}
-                    >
-                      <span className={styles.row}>
-                        {directory ? (
-                          <FolderSimpleIcon size={16} aria-hidden="true" />
-                        ) : entry.name.match(/\.(mdx?|txt)$/i) ? (
-                          <FileTextIcon size={16} aria-hidden="true" />
-                        ) : (
-                          <FileCodeIcon size={16} aria-hidden="true" />
-                        )}
-                        <span className={styles.rowName}>{entry.name}</span>
-                        {entry.isGitRepo && (
-                          <Badge>
-                            <GitBranchIcon size={12} aria-hidden="true" /> Git
-                          </Badge>
-                        )}
-                        {!directory && (
-                          <span className={styles.meta}>
-                            {formatSize(entry.size)}
+                  const inWorkspace = (roots ?? []).includes(entry.displayPath);
+                  if (renaming === entry.path) {
+                    return (
+                      <div key={entry.path} className={styles.renameBar}>
+                        <Input
+                          aria-label={`Rename ${entry.name}`}
+                          controlSize="sm"
+                          autoFocus
+                          value={renameDraft}
+                          disabled={renameBusy}
+                          onChange={(event) =>
+                            setRenameDraft(event.target.value)
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              setRenaming(undefined);
+                              setRenameDraft("");
+                              setRenameError("");
+                            }
+                            if (event.key !== "Enter") return;
+                            event.preventDefault();
+                            void confirmRename(entry);
+                          }}
+                        />
+                        <Button
+                          variant="prominent"
+                          size="sm"
+                          loading={renameBusy}
+                          disabled={!renameDraft.trim()}
+                          onClick={() => void confirmRename(entry)}
+                        >
+                          Save
+                        </Button>
+                        <Button
+                          variant="subtle"
+                          size="sm"
+                          disabled={renameBusy}
+                          onClick={() => {
+                            setRenaming(undefined);
+                            setRenameDraft("");
+                            setRenameError("");
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                        {renameError && (
+                          <span role="alert" className={styles.entryError}>
+                            {renameError}
                           </span>
                         )}
-                      </span>
-                    </Button>
+                      </div>
+                    );
+                  }
+                  if (deleting === entry.path) {
+                    return (
+                      <div key={entry.path} className={styles.deleteBar}>
+                        <span className={styles.rowName}>
+                          Delete {entry.name}?
+                        </span>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          loading={deleteBusy}
+                          onClick={() => void confirmDelete(entry)}
+                        >
+                          Delete
+                        </Button>
+                        <Button
+                          variant="subtle"
+                          size="sm"
+                          disabled={deleteBusy}
+                          onClick={() => {
+                            setDeleting(undefined);
+                            setDeleteError("");
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                        {deleteError && (
+                          <span role="alert" className={styles.entryError}>
+                            {deleteError}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={entry.path} className={styles.rowShell}>
+                      <Button
+                        variant="quiet"
+                        size="row"
+                        aria-current={
+                          previewEntry?.path === entry.path ? "true" : undefined
+                        }
+                        onClick={() => {
+                          if (directory) navigate(entry.displayPath);
+                          else openFile(entry);
+                        }}
+                        title={entry.displayPath}
+                      >
+                        <span className={styles.row}>
+                          {directory ? (
+                            <FolderSimpleIcon size={16} aria-hidden="true" />
+                          ) : entry.name.match(/\.(mdx?|txt)$/i) ? (
+                            <FileTextIcon size={16} aria-hidden="true" />
+                          ) : (
+                            <FileCodeIcon size={16} aria-hidden="true" />
+                          )}
+                          <span className={styles.rowName}>{entry.name}</span>
+                          {entry.isGitRepo && (
+                            <Badge>
+                              <GitBranchIcon size={12} aria-hidden="true" /> Git
+                            </Badge>
+                          )}
+                          {directory && inWorkspace && (
+                            <Badge>
+                              <FolderPlusIcon size={12} aria-hidden="true" />
+                              In workspace
+                            </Badge>
+                          )}
+                          {!directory && (
+                            <span className={styles.meta}>
+                              {formatSize(entry.size)}
+                            </span>
+                          )}
+                        </span>
+                      </Button>
+                      <MenuRoot>
+                        <MenuTrigger
+                          render={
+                            <IconButton
+                              variant="ghost"
+                              size="sm"
+                              aria-label={`Actions for ${entry.name}`}
+                              title={`Actions for ${entry.name}`}
+                              icon={
+                                <DotsThreeVerticalIcon
+                                  size={16}
+                                  aria-hidden="true"
+                                />
+                              }
+                            />
+                          }
+                        />
+                        <MenuPopup>
+                          <MenuItem
+                            onClick={() => {
+                              setRenaming(entry.path);
+                              setRenameDraft(entry.name);
+                              setRenameError("");
+                            }}
+                          >
+                            Rename
+                          </MenuItem>
+                          <MenuItem
+                            onClick={() => {
+                              setDeleting(entry.path);
+                              setDeleteError("");
+                            }}
+                          >
+                            Delete
+                          </MenuItem>
+                          {directory && (
+                            <MenuItem
+                              disabled={
+                                inWorkspace || !canvasWritable || addingFolder
+                              }
+                              onClick={() =>
+                                void addFolderToWorkspace(entry.displayPath)
+                              }
+                            >
+                              Add to chat workspace
+                            </MenuItem>
+                          )}
+                        </MenuPopup>
+                      </MenuRoot>
+                    </div>
                   );
                 })}
               {listing?.truncated && (
@@ -770,16 +1510,31 @@ export function registerRemoteFiles(ctx: Context) {
               loading={previewLoading}
               error={previewError}
               unsupported={previewUnsupported}
-              onRetry={retryPreview}
-              onClose={() => {
-                previewRequest.current += 1;
-                previewAbort.current?.abort();
-                setPreviewEntry(undefined);
-                setPreviewResult(undefined);
-                setPreviewError("");
-                setPreviewUnsupported(false);
-                setPreviewLoading(false);
+              editing={editing}
+              draft={draft}
+              dirty={dirty}
+              saving={saving}
+              saveError={saveError}
+              conflict={conflict}
+              discardGuard={
+                discardGuard && previewEntry
+                  ? { kind: discardGuard.kind, name: previewEntry.name }
+                  : undefined
+              }
+              onToggleEdit={() => setEditing((value) => !value)}
+              onDraftChange={setDraft}
+              onSave={(overwrite) => void saveFile(overwrite)}
+              onReloadFromDisk={reloadFromDisk}
+              onDiscard={() => {
+                setEditing(false);
+                setDraft(previewResult?.content ?? "");
+                setConflict(false);
+                setSaveError("");
               }}
+              onKeepEditing={() => setDiscardGuard(undefined)}
+              onDiscardGuard={discardChanges}
+              onRetry={retryPreview}
+              onClose={closePreview}
             />
           ) : (
             <div className={styles.preview}>

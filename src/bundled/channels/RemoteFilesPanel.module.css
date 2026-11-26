@@ -38,6 +38,15 @@
   padding: var(--space-2) var(--space-panel-inset) 0;
 }
 
+/* Trailing actions never shrink, so a narrow pane clips the breadcrumb
+ * trail instead of the buttons. */
+.toolbarActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
 .path {
   min-width: 0;
   margin: 0;
@@ -199,6 +208,99 @@
 
 .lineText {
   white-space: pre;
+}
+
+.rowShell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.rowShell > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.guard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-panel-inset);
+  border-bottom: 1px solid var(--border-standard);
+  color: var(--text-danger);
+}
+
+.guard > span:first-child {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.danger {
+  margin: 0;
+  color: var(--text-danger);
+}
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+}
+
+.conflict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-danger);
+}
+
+.conflict > span:first-child {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.createActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.createBar,
+.renameBar,
+.deleteBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-panel-inset) 0;
+}
+
+.createBar > :first-child,
+.renameBar > :first-child {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+.entryError {
+  flex-basis: 100%;
+  min-width: 0;
+  color: var(--text-danger);
+}
+
+.createError {
+  min-width: 0;
+  color: var(--text-danger);
+}
+
+.deleteBar > span:first-child {
+  flex: 1 1 10rem;
+  min-width: 0;
 }
 
 .body[data-preview="true"] .directory,

@@ -12,31 +12,25 @@ import {
   resetRemoteMachinesCache,
 } from "../agents/remote-machines";
 
-vi.mock("./RemoteFolderPickerDialog", () => ({
-  RemoteFolderPickerDialog: ({
-    open,
-    title,
+vi.mock("./InlineRemoteFolderBrowser", () => ({
+  InlineRemoteFolderBrowser: ({
+    label,
     onSelect,
-    onOpenChange,
+    onClose,
   }: {
-    open: boolean;
-    title?: string;
+    label?: string;
     onSelect(path: string): void;
-    onOpenChange(open: boolean): void;
-  }) =>
-    open ? (
-      <div role="dialog" aria-label={title}>
-        <button
-          type="button"
-          onClick={() => {
-            onSelect("~/remote/project");
-            onOpenChange(false);
-          }}
-        >
-          Pick remote folder
-        </button>
-      </div>
-    ) : null,
+    onClose(): void;
+  }) => (
+    <section aria-label={label}>
+      <button type="button" onClick={() => onSelect("~/remote/project")}>
+        Pick remote folder
+      </button>
+      <button type="button" onClick={onClose}>
+        Close remote browser
+      </button>
+    </section>
+  ),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -177,19 +171,20 @@ it("keeps the requirement after picker cancellation and preserves picker failure
   expect(screen.getByRole("button", { name: "Remove chosen" })).toBeVisible();
 });
 
-it("offers remote browsing only when a machine that is not a guest is configured", () => {
+it("offers remote browsing once a machine is configured, guests included", () => {
   const { unmount } = render(<Form />);
   expect(screen.queryByRole("button", { name: "Browse remote…" })).toBeNull();
   unmount();
   addRemoteMachine({
-    name: "Studio",
-    url: "wss://studio.example.org/_buzz-host",
+    name: "Guest Box",
+    url: "wss://guest.example.org/_buzz-host",
+    role: "guest",
   });
   render(<Form />);
   expect(screen.getByRole("button", { name: "Browse remote…" })).toBeVisible();
 });
 
-it("adds a folder selected on a remote machine", async () => {
+it("adds a folder from the inline browser and keeps it open for more folders", async () => {
   addRemoteMachine({
     name: "Studio",
     url: "wss://studio.example.org/_buzz-host",
@@ -197,13 +192,22 @@ it("adds a folder selected on a remote machine", async () => {
   render(<Form folders={[]} />);
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Browse remote…" }));
+  const browser = screen.getByRole("region", {
+    name: "Choose a remote folder",
+  });
+  expect(screen.queryByRole("dialog")).toBeNull();
   await user.click(screen.getByRole("button", { name: "Pick remote folder" }));
   expect(screen.getByRole("button", { name: "Remove project" })).toBeVisible();
   expect(screen.getByText("~/remote/project")).toBeVisible();
-  expect(screen.queryByRole("dialog")).toBeNull();
+  // Folders keep the browser open so several can be added in a row.
+  expect(browser).toBeVisible();
+  await user.click(
+    screen.getByRole("button", { name: "Close remote browser" }),
+  );
+  expect(screen.queryByRole("region")).toBeNull();
 });
 
-it("offers this computer and the remote machines for the worktree location", async () => {
+it("sets the worktree location from the inline browser and closes it", async () => {
   addRemoteMachine({
     name: "Studio",
     url: "wss://studio.example.org/_buzz-host",
@@ -217,12 +221,15 @@ it("offers this computer and the remote machines for the worktree location", asy
     await screen.findByRole("menuitem", { name: "This computer" }),
   ).toBeVisible();
   await user.click(screen.getByRole("menuitem", { name: "Studio" }));
-  await user.click(
-    await screen.findByRole("button", { name: "Pick remote folder" }),
-  );
+  expect(
+    screen.getByRole("region", { name: "Choose a worktree location" }),
+  ).toBeVisible();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Pick remote folder" }));
   expect(
     screen.getByRole("button", {
       name: "Worktree location: ~/remote/project",
     }),
   ).toBeVisible();
+  expect(screen.queryByRole("region")).toBeNull();
 });

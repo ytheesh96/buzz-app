@@ -6,17 +6,23 @@ import userEvent from "@testing-library/user-event";
 import type { RemoteMachine } from "../agents/remote-machines";
 import {
   listRemoteDirectory,
+  mkdirRemoteDirectory,
   RemoteFsUnsupportedError,
   type RemoteFsListResult,
 } from "../agents/remote-fs";
-import { RemoteFolderPickerDialog } from "./RemoteFolderPickerDialog";
+import { InlineRemoteFolderBrowser } from "./InlineRemoteFolderBrowser";
 
 vi.mock("../agents/remote-fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../agents/remote-fs")>();
-  return { ...actual, listRemoteDirectory: vi.fn() };
+  return {
+    ...actual,
+    listRemoteDirectory: vi.fn(),
+    mkdirRemoteDirectory: vi.fn(),
+  };
 });
 
 const list = vi.mocked(listRemoteDirectory);
+const mkdir = vi.mocked(mkdirRemoteDirectory);
 
 const machine: RemoteMachine = {
   id: "m1",
@@ -25,6 +31,14 @@ const machine: RemoteMachine = {
   token: "",
   routes: [{ type: "wss", url: "wss://studio.example.org/_buzz-host" }],
   source: "manual",
+};
+
+const lab: RemoteMachine = {
+  ...machine,
+  id: "m2",
+  name: "Lab",
+  url: "wss://lab.example.org/_buzz-host",
+  routes: [{ type: "wss", url: "wss://lab.example.org/_buzz-host" }],
 };
 
 const dev: RemoteFsListResult = {
@@ -81,21 +95,17 @@ const project: RemoteFsListResult = {
   ],
 };
 
-const home: RemoteFsListResult = {
-  ...dev,
-  path: "/home",
-  displayPath: "~",
-  parent: "/",
-  parentDisplay: "/",
+const fresh: RemoteFsListResult = {
+  ...project,
   entries: [
     {
-      name: "newest",
-      path: "/home/newest",
-      displayPath: "~/newest",
+      name: "brand-new",
+      path: "/home/dev/project/brand-new",
+      displayPath: "~/dev/project/brand-new",
       kind: "dir",
       targetKind: null,
       size: 4096,
-      mtimeMs: 0,
+      mtimeMs: 1_700_000_000_000,
       hidden: false,
       isGitRepo: false,
     },
@@ -114,37 +124,42 @@ function deferred() {
 
 beforeEach(() => {
   list.mockReset();
+  mkdir.mockReset();
 });
 afterEach(() => cleanup());
 
-function renderPicker({
+function renderBrowser({
   machines = [machine],
+  initialPath,
   onSelect = vi.fn(),
-  onOpenChange = vi.fn(),
+  onClose = vi.fn(),
 }: {
   machines?: RemoteMachine[];
+  initialPath?: string;
   onSelect?: (path: string) => void;
-  onOpenChange?: (open: boolean) => void;
+  onClose?: () => void;
 } = {}) {
   render(
-    <RemoteFolderPickerDialog
-      open
-      onOpenChange={onOpenChange}
+    <InlineRemoteFolderBrowser
       machines={machines}
+      initialPath={initialPath}
       onSelect={onSelect}
+      onClose={onClose}
     />,
   );
-  return { onSelect, onOpenChange };
+  return { onSelect, onClose };
 }
 
-it("lists folders, filters them, and returns the current display path", async () => {
+it("lists folders, filters them, and selects the current display path", async () => {
   list.mockResolvedValue(dev);
-  const { onSelect, onOpenChange } = renderPicker();
+  const { onSelect, onClose } = renderBrowser();
   const user = userEvent.setup();
 
   expect(await screen.findByRole("button", { name: /project/ })).toBeVisible();
   expect(screen.getByRole("button", { name: /notes/ })).toBeVisible();
   expect(screen.getByText("Git")).toBeVisible();
+  expect(screen.getByText("Studio")).toBeVisible();
+  expect(screen.queryByRole("combobox", { name: "Machine" })).toBeNull();
   expect(list).toHaveBeenCalledWith(
     machine,
     { dirsOnly: true, showHidden: false },
@@ -158,14 +173,14 @@ it("lists folders, filters them, and returns the current display path", async ()
   expect(screen.getByRole("button", { name: /project/ })).toBeVisible();
   expect(screen.queryByRole("button", { name: /notes/ })).toBeNull();
 
-  await user.click(screen.getByRole("button", { name: "Select folder" }));
+  await user.click(screen.getByRole("button", { name: "Use this folder" }));
   expect(onSelect).toHaveBeenCalledWith("~/dev");
-  expect(onOpenChange).toHaveBeenCalledWith(false);
+  expect(onClose).not.toHaveBeenCalled();
 });
 
-it("opens a folder on double-click or Enter and selects a highlighted row", async () => {
+it("opens a folder on double-click or Enter and selects a child row", async () => {
   list.mockResolvedValueOnce(dev).mockResolvedValue(project);
-  const { onSelect } = renderPicker();
+  const { onSelect } = renderBrowser();
   const user = userEvent.setup();
   const row = await screen.findByRole("button", { name: /project/ });
 
@@ -177,47 +192,120 @@ it("opens a folder on double-click or Enter and selects a highlighted row", asyn
       expect.anything(),
     ),
   );
-  expect(screen.getByRole("textbox", { name: "Path" })).toHaveValue(
-    "~/dev/project",
-  );
   expect(screen.getByRole("button", { name: /stale/ })).toBeVisible();
 
-  list.mockResolvedValueOnce(dev);
-  const up = screen.getByRole("button", { name: "Go up" });
-  await user.click(up);
-  const notes = await screen.findByRole("button", { name: /notes/ });
-  await user.click(notes);
-  expect(notes).toHaveAttribute("aria-pressed", "true");
-  await user.click(screen.getByRole("button", { name: "Select folder" }));
-  expect(onSelect).toHaveBeenLastCalledWith("~/dev/notes");
+  await user.click(screen.getByRole("button", { name: "Select" }));
+  expect(onSelect).toHaveBeenCalledWith("~/dev/project/stale");
 });
 
-it("navigates from an edited path on Enter", async () => {
-  list.mockResolvedValueOnce(dev).mockResolvedValueOnce(project);
-  renderPicker();
+it("navigates from breadcrumbs and the up button", async () => {
+  list
+    .mockResolvedValueOnce(dev)
+    .mockResolvedValueOnce(project)
+    .mockResolvedValueOnce(dev);
+  renderBrowser();
   const user = userEvent.setup();
   await screen.findByRole("button", { name: /project/ });
-  const path = screen.getByRole("textbox", { name: "Path" });
-  await user.clear(path);
-  await user.type(path, "~/dev/project{Enter}");
+
+  await user.click(screen.getByRole("button", { name: "Go up" }));
   await waitFor(() =>
     expect(list).toHaveBeenLastCalledWith(
       machine,
-      { path: "~/dev/project", dirsOnly: true, showHidden: false },
+      { path: "/home", dirsOnly: true, showHidden: false },
+      expect.anything(),
+    ),
+  );
+
+  await user.click(screen.getByRole("button", { name: "~" }));
+  await waitFor(() =>
+    expect(list).toHaveBeenLastCalledWith(
+      machine,
+      { path: "~", dirsOnly: true, showHidden: false },
       expect.anything(),
     ),
   );
 });
 
+it("creates a folder inline and navigates into it", async () => {
+  list.mockResolvedValueOnce(dev).mockResolvedValueOnce(fresh);
+  mkdir.mockResolvedValue({
+    path: "/home/dev/project/brand-new",
+    displayPath: "~/dev/project/brand-new",
+    name: "brand-new",
+    kind: "dir",
+    mtimeMs: 1_700_000_000_000,
+  });
+  renderBrowser();
+  const user = userEvent.setup();
+  await screen.findByRole("button", { name: /project/ });
+
+  await user.click(screen.getByRole("button", { name: "New folder" }));
+  const name = screen.getByRole("textbox", { name: "New folder name" });
+  await user.type(name, "brand-new{Enter}");
+  await waitFor(() =>
+    expect(mkdir).toHaveBeenCalledWith(machine, { path: "~/dev/brand-new" }),
+  );
+  expect(
+    await screen.findByRole("button", { name: /brand-new/ }),
+  ).toBeVisible();
+});
+
+it("offers a machine selector with several machines", async () => {
+  list.mockResolvedValue(dev);
+  renderBrowser({ machines: [machine, lab] });
+  const user = userEvent.setup();
+  await screen.findByRole("button", { name: /project/ });
+
+  await user.click(screen.getByRole("combobox", { name: "Machine" }));
+  await user.click(await screen.findByRole("option", { name: "Lab" }));
+  await waitFor(() =>
+    expect(list).toHaveBeenLastCalledWith(
+      lab,
+      { dirsOnly: true, showHidden: false },
+      expect.anything(),
+    ),
+  );
+});
+
+it("reloads with hidden folders after the toggle", async () => {
+  list.mockResolvedValue(dev);
+  renderBrowser();
+  const user = userEvent.setup();
+  await screen.findByRole("button", { name: /project/ });
+
+  await user.click(screen.getByRole("button", { name: "Show hidden folders" }));
+  await waitFor(() =>
+    expect(list).toHaveBeenLastCalledWith(
+      machine,
+      { dirsOnly: true, showHidden: true },
+      expect.anything(),
+    ),
+  );
+});
+
+it("starts at the requested path", async () => {
+  list.mockResolvedValue(project);
+  renderBrowser({ initialPath: "~/dev/project" });
+  expect(await screen.findByRole("button", { name: /stale/ })).toBeVisible();
+  expect(list).toHaveBeenCalledWith(
+    machine,
+    { path: "~/dev/project", dirsOnly: true, showHidden: false },
+    expect.anything(),
+  );
+});
+
 it("shows the buzz-host upgrade notice when the host lacks fs.list", async () => {
   list.mockRejectedValue(new RemoteFsUnsupportedError());
-  renderPicker();
+  renderBrowser();
   expect(
     await screen.findByText(
       "Update buzz-host on this machine to browse files.",
     ),
   ).toBeVisible();
   expect(screen.getByText("Files are unavailable")).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "Use this folder" }),
+  ).toBeDisabled();
 });
 
 it("keeps the newest directory when an older request resolves late", async () => {
@@ -227,7 +315,7 @@ it("keeps the newest directory when an older request resolves late", async () =>
     .mockResolvedValueOnce(dev)
     .mockReturnValueOnce(first.promise)
     .mockReturnValueOnce(second.promise);
-  renderPicker();
+  renderBrowser();
   const user = userEvent.setup();
 
   await user.dblClick(await screen.findByRole("button", { name: /project/ }));
@@ -236,12 +324,14 @@ it("keeps the newest directory when an older request resolves late", async () =>
   await user.click(screen.getByRole("button", { name: "~" }));
   await waitFor(() => expect(list).toHaveBeenCalledTimes(3));
 
-  second.resolve(home);
-  expect(await screen.findByRole("button", { name: /newest/ })).toBeVisible();
+  second.resolve(fresh);
+  expect(
+    await screen.findByRole("button", { name: /brand-new/ }),
+  ).toBeVisible();
 
   first.resolve(project);
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: /newest/ })).toBeVisible(),
+    expect(screen.getByRole("button", { name: /brand-new/ })).toBeVisible(),
   );
   expect(screen.queryByRole("button", { name: /stale/ })).toBeNull();
 });

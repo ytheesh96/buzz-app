@@ -70,8 +70,68 @@ export type RemoteFsRequestOptions = Readonly<{
   WebSocketImpl?: WebSocketConstructor | undefined;
 }>;
 
+export type RemoteFsWriteParams = Readonly<{
+  path: string;
+  content: string;
+  /** When set, the host rejects the write when the file's mtime moved. */
+  expectedMtimeMs?: number | undefined;
+  /** When true, the write fails if the file already exists. */
+  createOnly?: boolean | undefined;
+}>;
+
+export type RemoteFsWriteResult = Readonly<{
+  path: string;
+  displayPath: string;
+  name: string;
+  size: number;
+  mtimeMs: number;
+}>;
+
+export type RemoteFsMkdirParams = Readonly<{
+  path: string;
+  recursive?: boolean | undefined;
+}>;
+
+export type RemoteFsMkdirResult = Readonly<{
+  path: string;
+  displayPath: string;
+  name: string;
+  kind: "dir";
+  mtimeMs: number;
+}>;
+
+export type RemoteFsRenameParams = Readonly<{
+  from: string;
+  to: string;
+}>;
+
+export type RemoteFsRenameResult = Readonly<{
+  from: string;
+  to: string;
+  path: string;
+  displayPath: string;
+  name: string;
+}>;
+
+export type RemoteFsDeleteParams = Readonly<{
+  path: string;
+  recursive?: boolean | undefined;
+}>;
+
+export type RemoteFsDeleteResult = Readonly<{
+  path: string;
+  displayPath: string;
+  deleted: boolean;
+}>;
+
 type WebSocketConstructor = new (url: string) => WebSocket;
-type RemoteFsMethod = "fs.list" | "fs.read";
+type RemoteFsMethod =
+  | "fs.list"
+  | "fs.read"
+  | "fs.write"
+  | "fs.mkdir"
+  | "fs.rename"
+  | "fs.delete";
 
 /** The fields the RPC needs from a configured machine. */
 export type RemoteFsMachine = Pick<
@@ -120,6 +180,46 @@ export function isRemoteFsUnsupported(error: unknown): boolean {
     error instanceof RemoteFsUnsupportedError ||
     (error instanceof Error && error.name === "RemoteFsUnsupportedError")
   );
+}
+
+export const REMOTE_FS_CONFLICT_PREFIX = "CONFLICT:";
+export const REMOTE_FS_ALREADY_EXISTS_PREFIX = "ALREADY_EXISTS:";
+
+/** The host reported `CONFLICT:` (the file changed since the expected mtime). */
+export function isRemoteFsConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.startsWith(REMOTE_FS_CONFLICT_PREFIX)
+  );
+}
+
+/** The host reported `ALREADY_EXISTS:` (an entry already occupies the path). */
+export function isRemoteFsAlreadyExists(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.startsWith(REMOTE_FS_ALREADY_EXISTS_PREFIX)
+  );
+}
+
+/** Strips the internal `CONFLICT:`/`ALREADY_EXISTS:` prefix for display. */
+export function cleanRemoteFsErrorMessage(message: string): string {
+  if (message.startsWith(REMOTE_FS_CONFLICT_PREFIX))
+    return message.slice(REMOTE_FS_CONFLICT_PREFIX.length).trim();
+  if (message.startsWith(REMOTE_FS_ALREADY_EXISTS_PREFIX))
+    return message.slice(REMOTE_FS_ALREADY_EXISTS_PREFIX.length).trim();
+  return message;
+}
+
+/**
+ * Joins a child name onto a directory path, handling trailing slashes and the
+ * `~` home alias. Pure: used by both the inline browser and the Files panel.
+ */
+export function joinRemotePath(dirDisplayOrAbs: string, name: string): string {
+  const dir = dirDisplayOrAbs.trim().replace(/[\\/]+$/, "");
+  const part = name.trim().replace(/^[\\/]+/, "");
+  if (!part) return dir || "/";
+  if (!dir || dir === "/") return `/${part}`;
+  return `${dir}/${part}`;
 }
 
 class RemoteFsRpcError extends Error {
@@ -263,6 +363,58 @@ function parseReadResult(raw: unknown): RemoteFsReadResult {
     isImage: result.isImage === true,
     truncated: result.truncated === true,
     content: typeof result.content === "string" ? result.content : null,
+  });
+}
+
+function parseWriteResult(raw: unknown): RemoteFsWriteResult {
+  const result = record(raw);
+  const path = text(result?.path);
+  if (!result || !path) throw invalid("file write");
+  return Object.freeze({
+    path,
+    displayPath: text(result.displayPath) ?? path,
+    name: text(result.name) ?? path.split("/").at(-1) ?? path,
+    size: finiteNumber(result.size) ?? 0,
+    mtimeMs: finiteNumber(result.mtimeMs) ?? 0,
+  });
+}
+
+function parseMkdirResult(raw: unknown): RemoteFsMkdirResult {
+  const result = record(raw);
+  const path = text(result?.path);
+  if (!result || !path) throw invalid("directory creation");
+  return Object.freeze({
+    path,
+    displayPath: text(result.displayPath) ?? path,
+    name: text(result.name) ?? path.split("/").at(-1) ?? path,
+    kind: "dir" as const,
+    mtimeMs: finiteNumber(result.mtimeMs) ?? 0,
+  });
+}
+
+function parseRenameResult(raw: unknown): RemoteFsRenameResult {
+  const result = record(raw);
+  const from = text(result?.from);
+  const to = text(result?.to);
+  const path = text(result?.path);
+  if (!result || !from || !to || !path) throw invalid("rename");
+  return Object.freeze({
+    from,
+    to,
+    path,
+    displayPath: text(result.displayPath) ?? path,
+    name: text(result.name) ?? path.split("/").at(-1) ?? path,
+  });
+}
+
+function parseDeleteResult(raw: unknown): RemoteFsDeleteResult {
+  const result = record(raw);
+  const path = text(result?.path);
+  if (!result || !path) throw invalid("deletion");
+  return Object.freeze({
+    path,
+    displayPath: text(result.displayPath) ?? path,
+    deleted: result.deleted === true,
   });
 }
 
@@ -481,7 +633,11 @@ async function sessionFor(
 }
 
 function normalizeRpcError(error: RemoteFsRpcError): Error {
-  if (/unknown method|method not found/i.test(error.message))
+  if (
+    /unknown method|method not found|not permitted for guest accounts/i.test(
+      error.message,
+    )
+  )
     return new RemoteFsUnsupportedError();
   return new Error(error.message);
 }
@@ -566,17 +722,72 @@ export function readRemoteFile(
   return callRemote(machine, "fs.read", payload, parseReadResult, options);
 }
 
+/** Writes one file's contents. Rejects with `CONFLICT:` when the expected
+ * mtime no longer matches, and with `ALREADY_EXISTS:` when `createOnly` is
+ * set and the file already exists. */
+export function writeRemoteFile(
+  machine: RemoteFsMachine,
+  params: RemoteFsWriteParams,
+  options: RemoteFsRequestOptions = {},
+): Promise<RemoteFsWriteResult> {
+  const payload: Record<string, unknown> = {
+    path: params.path,
+    content: params.content,
+  };
+  if (params.expectedMtimeMs !== undefined)
+    payload.expectedMtimeMs = params.expectedMtimeMs;
+  if (params.createOnly !== undefined) payload.createOnly = params.createOnly;
+  return callRemote(machine, "fs.write", payload, parseWriteResult, options);
+}
+
+/** Creates a directory. Rejects with `ALREADY_EXISTS:` when the path exists. */
+export function mkdirRemoteDirectory(
+  machine: RemoteFsMachine,
+  params: RemoteFsMkdirParams,
+  options: RemoteFsRequestOptions = {},
+): Promise<RemoteFsMkdirResult> {
+  const payload: Record<string, unknown> = { path: params.path };
+  if (params.recursive !== undefined) payload.recursive = params.recursive;
+  return callRemote(machine, "fs.mkdir", payload, parseMkdirResult, options);
+}
+
+/** Renames a file or directory to a new path. */
+export function renameRemoteEntry(
+  machine: RemoteFsMachine,
+  params: RemoteFsRenameParams,
+  options: RemoteFsRequestOptions = {},
+): Promise<RemoteFsRenameResult> {
+  return callRemote(
+    machine,
+    "fs.rename",
+    { from: params.from, to: params.to },
+    parseRenameResult,
+    options,
+  );
+}
+
+/** Deletes a file, or a directory when `recursive` is set. */
+export function deleteRemoteEntry(
+  machine: RemoteFsMachine,
+  params: RemoteFsDeleteParams,
+  options: RemoteFsRequestOptions = {},
+): Promise<RemoteFsDeleteResult> {
+  const payload: Record<string, unknown> = { path: params.path };
+  if (params.recursive !== undefined) payload.recursive = params.recursive;
+  return callRemote(machine, "fs.delete", payload, parseDeleteResult, options);
+}
+
 /**
- * Configured machines whose files this device may browse: admin machines and
- * manual machines not yet known to be guests. Online machines come first so a
- * picker opens on the machine that will answer.
+ * Configured machines whose files this device may browse: admin machines,
+ * guest machines (their sandboxed home), and manual machines not yet known.
+ * Online machines come first so a picker opens on the machine that will
+ * answer.
  */
 export function browsableRemoteMachines(
   machines: readonly RemoteMachine[],
   statuses: Readonly<Record<string, RemoteMachineStatus>> = {},
 ): readonly RemoteMachine[] {
   const rank = (machine: RemoteMachine) => {
-    if (machine.role === "guest") return undefined;
     const state = statuses[machine.id]?.state;
     return state === "online" ? 0 : state === "offline" ? 2 : 1;
   };

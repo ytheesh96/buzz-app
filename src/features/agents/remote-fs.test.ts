@@ -14,12 +14,20 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { resetIrohTunnelCache } from "./iroh-tunnel";
 import {
   browsableRemoteMachines,
+  cleanRemoteFsErrorMessage,
+  deleteRemoteEntry,
+  isRemoteFsAlreadyExists,
+  isRemoteFsConflict,
   isRemoteFsUnsupported,
+  joinRemotePath,
   listRemoteDirectory,
+  mkdirRemoteDirectory,
   readRemoteFile,
   REMOTE_FS_UNSUPPORTED_MESSAGE,
   remotePathCrumbs,
+  renameRemoteEntry,
   resetRemoteFsSessions,
+  writeRemoteFile,
   type RemoteFsMachine,
 } from "./remote-fs";
 import type { RemoteMachine } from "./remote-machines";
@@ -340,7 +348,7 @@ it("aborts an in-flight request without closing the pool", async () => {
   expect(FakeWebSocket.instances[0]?.closed).toBe(false);
 });
 
-it("offers admin and unresolved manual machines but not guests", () => {
+it("offers admin, guest, and unresolved manual machines, online first", () => {
   const base = {
     url: "wss://box.example.org/_buzz-host",
     token: "",
@@ -362,7 +370,7 @@ it("offers admin and unresolved manual machines but not guests", () => {
       admin: { state: "online" },
       manual: { state: "offline" },
     }).map(({ id }) => id),
-  ).toEqual(["admin", "manual"]);
+  ).toEqual(["admin", "guest", "manual"]);
 });
 
 it("builds breadcrumbs for home-relative and absolute display paths", () => {
@@ -376,4 +384,196 @@ it("builds breadcrumbs for home-relative and absolute display paths", () => {
     { label: "home", path: "/home" },
     { label: "dev", path: "/home/dev" },
   ]);
+});
+
+it("writes a file and parses the locked contract", async () => {
+  FakeWebSocket.handler = (ws, msg) => {
+    if (msg.method === "auth") ws.reply(msg.id, {});
+    if (msg.method === "fs.write")
+      ws.reply(msg.id, {
+        path: "/home/dev/notes.txt",
+        displayPath: "~/dev/notes.txt",
+        name: "notes.txt",
+        size: 42,
+        mtimeMs: 1_700_000_000_500,
+      });
+  };
+  const result = await writeRemoteFile(
+    machine,
+    {
+      path: "~/dev/notes.txt",
+      content: "hello",
+      expectedMtimeMs: 1_700_000_000_000,
+    },
+    { WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket },
+  );
+  expect(FakeWebSocket.instances[0]?.sent[1]).toMatchObject({
+    method: "fs.write",
+    params: {
+      path: "~/dev/notes.txt",
+      content: "hello",
+      expectedMtimeMs: 1_700_000_000_000,
+    },
+  });
+  expect(result).toMatchObject({
+    path: "/home/dev/notes.txt",
+    displayPath: "~/dev/notes.txt",
+    name: "notes.txt",
+    size: 42,
+    mtimeMs: 1_700_000_000_500,
+  });
+});
+
+it("passes createOnly and omits undefined optional params", async () => {
+  FakeWebSocket.handler = (ws, msg) => {
+    if (msg.method === "auth") ws.reply(msg.id, {});
+    if (msg.method === "fs.write")
+      ws.reply(msg.id, {
+        path: "/home/dev/new.md",
+        displayPath: "~/dev/new.md",
+        name: "new.md",
+        size: 0,
+        mtimeMs: 1,
+      });
+  };
+  await writeRemoteFile(
+    machine,
+    { path: "/home/dev/new.md", content: "", createOnly: true },
+    { WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket },
+  );
+  expect(FakeWebSocket.instances[0]?.sent[1]?.params).toEqual({
+    path: "/home/dev/new.md",
+    content: "",
+    createOnly: true,
+  });
+});
+
+it("creates a directory and parses the locked contract", async () => {
+  FakeWebSocket.handler = (ws, msg) => {
+    if (msg.method === "auth") ws.reply(msg.id, {});
+    if (msg.method === "fs.mkdir")
+      ws.reply(msg.id, {
+        path: "/home/dev/project/src",
+        displayPath: "~/dev/project/src",
+        name: "src",
+        kind: "dir",
+        mtimeMs: 1_700_000_000_500,
+      });
+  };
+  const result = await mkdirRemoteDirectory(
+    machine,
+    { path: "~/dev/project/src" },
+    { WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket },
+  );
+  expect(FakeWebSocket.instances[0]?.sent[1]).toMatchObject({
+    method: "fs.mkdir",
+    params: { path: "~/dev/project/src" },
+  });
+  expect(result).toMatchObject({
+    path: "/home/dev/project/src",
+    name: "src",
+    kind: "dir",
+  });
+});
+
+it("renames an entry and parses the locked contract", async () => {
+  FakeWebSocket.handler = (ws, msg) => {
+    if (msg.method === "auth") ws.reply(msg.id, {});
+    if (msg.method === "fs.rename")
+      ws.reply(msg.id, {
+        from: "/home/dev/old.txt",
+        to: "/home/dev/new.txt",
+        path: "/home/dev/new.txt",
+        displayPath: "~/dev/new.txt",
+        name: "new.txt",
+      });
+  };
+  const result = await renameRemoteEntry(
+    machine,
+    { from: "/home/dev/old.txt", to: "/home/dev/new.txt" },
+    { WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket },
+  );
+  expect(FakeWebSocket.instances[0]?.sent[1]).toMatchObject({
+    method: "fs.rename",
+    params: { from: "/home/dev/old.txt", to: "/home/dev/new.txt" },
+  });
+  expect(result).toMatchObject({
+    from: "/home/dev/old.txt",
+    to: "/home/dev/new.txt",
+    displayPath: "~/dev/new.txt",
+  });
+});
+
+it("deletes an entry with recursive for directories", async () => {
+  FakeWebSocket.handler = (ws, msg) => {
+    if (msg.method === "auth") ws.reply(msg.id, {});
+    if (msg.method === "fs.delete")
+      ws.reply(msg.id, {
+        path: "/home/dev/project",
+        displayPath: "~/dev/project",
+        deleted: true,
+      });
+  };
+  const result = await deleteRemoteEntry(
+    machine,
+    { path: "/home/dev/project", recursive: true },
+    { WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket },
+  );
+  expect(FakeWebSocket.instances[0]?.sent[1]).toMatchObject({
+    method: "fs.delete",
+    params: { path: "/home/dev/project", recursive: true },
+  });
+  expect(result).toMatchObject({ deleted: true, displayPath: "~/dev/project" });
+});
+
+it("surfaces CONFLICT and ALREADY_EXISTS errors with clean messages", async () => {
+  const conflict = new Error("CONFLICT: File changed on disk.");
+  const exists = new Error("ALREADY_EXISTS: notes.txt exists.");
+  const plain = new Error("Something else failed.");
+  expect(isRemoteFsConflict(conflict)).toBe(true);
+  expect(isRemoteFsConflict(exists)).toBe(false);
+  expect(isRemoteFsAlreadyExists(exists)).toBe(true);
+  expect(isRemoteFsAlreadyExists(conflict)).toBe(false);
+  expect(isRemoteFsAlreadyExists(plain)).toBe(false);
+  expect(isRemoteFsConflict(plain)).toBe(false);
+  expect(cleanRemoteFsErrorMessage("CONFLICT: File changed on disk.")).toBe(
+    "File changed on disk.",
+  );
+  expect(cleanRemoteFsErrorMessage("ALREADY_EXISTS: notes.txt exists.")).toBe(
+    "notes.txt exists.",
+  );
+  expect(cleanRemoteFsErrorMessage("Keep me")).toBe("Keep me");
+});
+
+it("maps a guest-permission refusal to the upgrade notice", async () => {
+  FakeWebSocket.handler = (ws, msg) => {
+    if (msg.method === "auth") ws.reply(msg.id, {});
+    if (msg.method === "fs.list")
+      ws.fail(msg.id, "not permitted for guest accounts");
+  };
+  const error = await listRemoteDirectory(
+    machine,
+    {},
+    {
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    },
+  ).catch((reason: unknown) => reason);
+  expect(error).toMatchObject({
+    name: "RemoteFsUnsupportedError",
+    message: REMOTE_FS_UNSUPPORTED_MESSAGE,
+  });
+  expect(isRemoteFsUnsupported(error)).toBe(true);
+});
+
+it("joins names onto directory paths without double slashes", () => {
+  expect(joinRemotePath("~/dev", "app")).toBe("~/dev/app");
+  expect(joinRemotePath("~/dev/", "app")).toBe("~/dev/app");
+  expect(joinRemotePath("~", "app")).toBe("~/app");
+  expect(joinRemotePath("/", "etc")).toBe("/etc");
+  expect(joinRemotePath("/home/dev", "notes.txt")).toBe("/home/dev/notes.txt");
+  expect(joinRemotePath("", "etc")).toBe("/etc");
+  expect(joinRemotePath("~/dev", "  ")).toBe("~/dev");
+  expect(joinRemotePath("/home/dev/", "/notes.txt")).toBe(
+    "/home/dev/notes.txt",
+  );
 });
