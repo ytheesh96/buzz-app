@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { RemoteMachine } from "../agents/remote-machines";
 import {
   isRemoteFsUnsupported,
@@ -84,6 +90,10 @@ export function InlineRemoteFolderBrowser({
   const request = useRef(0);
   const abort = useRef<AbortController | undefined>(undefined);
   const startPath = useRef<string | undefined>(initialPath);
+  const browserRef = useRef<HTMLElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
+  const crumbsRef = useRef<HTMLElement>(null);
+  const crumbsPinned = useRef(true);
   const machine =
     machineId && machines.some(({ id }) => id === machineId)
       ? machines.find(({ id }) => id === machineId)
@@ -96,6 +106,85 @@ export function InlineRemoteFolderBrowser({
     },
     [],
   );
+
+  // Reserve clearance above a flow Dialog's sticky footer scrim so opening,
+  // growing, or tabbing into this inline browser never leaves "Use this folder"
+  // underneath Cancel / Save changes.
+  useLayoutEffect(() => {
+    const browser = browserRef.current;
+    const dialog = browser?.closest<HTMLElement>(".buzz-dialog");
+    const dialogActions = dialog?.querySelector<HTMLElement>(
+      ":scope > .buzz-dialog-actions",
+    );
+    if (!browser || !dialog || !dialogActions) return;
+    const previous = dialog.style.getPropertyValue("scroll-padding-block-end");
+    const priority = dialog.style.getPropertyPriority(
+      "scroll-padding-block-end",
+    );
+    const measure = () => {
+      const height = Math.ceil(dialogActions.offsetHeight);
+      if (height <= 0) return;
+      dialog.style.setProperty("scroll-padding-block-end", `${height}px`);
+    };
+    measure();
+    const observer =
+      typeof ResizeObserver === "function"
+        ? new ResizeObserver(measure)
+        : undefined;
+    observer?.observe(dialogActions);
+    return () => {
+      observer?.disconnect();
+      if (previous) {
+        dialog.style.setProperty(
+          "scroll-padding-block-end",
+          previous,
+          priority,
+        );
+      } else {
+        dialog.style.removeProperty("scroll-padding-block-end");
+      }
+    };
+  }, []);
+
+  const revealKey = `${listing?.path ?? ""}|${error}|${unsupported}|${newFolder}`;
+  const lastRevealKey = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (lastRevealKey.current === revealKey) return;
+    lastRevealKey.current = revealKey;
+    const footer = footerRef.current;
+    if (footer && typeof footer.scrollIntoView === "function") {
+      footer.scrollIntoView({ block: "nearest" });
+    }
+  }, [revealKey]);
+
+  const syncCrumbs = useCallback((pinEnd: boolean) => {
+    const nav = crumbsRef.current;
+    if (!nav) return;
+    if (pinEnd) {
+      nav.scrollLeft = Math.max(0, nav.scrollWidth - nav.clientWidth);
+    }
+    const start = nav.scrollLeft > 1;
+    const end = nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 1;
+    nav.toggleAttribute("data-overflow-start", start);
+    nav.toggleAttribute("data-overflow-end", end);
+  }, []);
+
+  const displayPath = listing?.displayPath;
+  useLayoutEffect(() => {
+    if (!displayPath) return;
+    crumbsPinned.current = true;
+    syncCrumbs(true);
+  }, [displayPath, syncCrumbs]);
+
+  useLayoutEffect(() => {
+    const nav = crumbsRef.current;
+    if (!nav || typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(() => {
+      syncCrumbs(crumbsPinned.current);
+    });
+    observer.observe(nav);
+    return () => observer.disconnect();
+  }, [syncCrumbs]);
 
   const load = useCallback(
     async (path?: string) => {
@@ -208,8 +297,10 @@ export function InlineRemoteFolderBrowser({
       </p>
     ) : null;
 
+  const crumbs = listing ? remotePathCrumbs(listing.displayPath) : [];
+
   return (
-    <section className={styles.browser} aria-label={label}>
+    <section ref={browserRef} className={styles.browser} aria-label={label}>
       <div className={styles.header}>
         {machineSelect}
         <div className={styles.actions}>
@@ -265,27 +356,40 @@ export function InlineRemoteFolderBrowser({
           />
         </div>
       </div>
-      <nav className={styles.crumbs} aria-label="Folder path">
-        {listing
-          ? remotePathCrumbs(listing.displayPath).map((crumb, index) => (
-              <span key={crumb.path} className={styles.crumb}>
-                {index > 0 && (
-                  <CaretRightIcon
-                    size={12}
-                    aria-hidden="true"
-                    className={styles.separator}
-                  />
-                )}
-                <Button
-                  variant="link"
-                  size="inline"
-                  onClick={() => navigate(crumb.path)}
-                >
-                  {crumb.label}
-                </Button>
-              </span>
-            ))
-          : null}
+      <nav
+        ref={crumbsRef}
+        className={styles.crumbs}
+        aria-label="Folder path"
+        onScroll={() => {
+          const nav = crumbsRef.current;
+          if (!nav) return;
+          crumbsPinned.current =
+            nav.scrollLeft + nav.clientWidth >= nav.scrollWidth - 1;
+          syncCrumbs(false);
+        }}
+      >
+        {crumbs.map((crumb, index) => (
+          <span key={crumb.path} className={styles.crumb}>
+            {index > 0 && (
+              <CaretRightIcon
+                size={12}
+                aria-hidden="true"
+                className={styles.separator}
+              />
+            )}
+            <Button
+              variant="link"
+              size="inline"
+              title={crumb.path}
+              aria-current={
+                index === crumbs.length - 1 ? "location" : undefined
+              }
+              onClick={() => navigate(crumb.path)}
+            >
+              {crumb.label}
+            </Button>
+          </span>
+        ))}
       </nav>
       {newFolder && (
         <div className={styles.newFolder}>
@@ -433,7 +537,7 @@ export function InlineRemoteFolderBrowser({
           </p>
         )}
       </div>
-      <div className={styles.footer}>
+      <div ref={footerRef} className={styles.footer}>
         <Button
           variant="prominent"
           size="sm"

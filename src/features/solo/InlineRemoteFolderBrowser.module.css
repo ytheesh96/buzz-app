@@ -8,6 +8,7 @@
   border: 1px solid var(--border-standard);
   border-radius: var(--radius-control);
   background: var(--surface-inset-subtle);
+  scroll-margin-block-end: var(--space-3);
 }
 
 .header {
@@ -39,12 +40,40 @@
 }
 
 .crumbs {
+  --crumbs-fade: var(--space-4);
   display: flex;
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
   overflow-x: auto;
+  padding-block: var(--space-1);
+  margin-block: calc(-1 * var(--space-1));
   scrollbar-width: none;
+}
+
+.crumbs[data-overflow-start]:not([data-overflow-end]) {
+  mask-image: linear-gradient(to right, transparent, black var(--crumbs-fade));
+}
+
+.crumbs[data-overflow-end]:not([data-overflow-start]) {
+  mask-image: linear-gradient(to left, transparent, black var(--crumbs-fade));
+}
+
+.crumbs[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    black var(--crumbs-fade),
+    black calc(100% - var(--crumbs-fade)),
+    transparent
+  );
+}
+
+@media (forced-colors: active), (prefers-reduced-transparency: reduce) {
+  .crumbs[data-overflow-start],
+  .crumbs[data-overflow-end] {
+    mask-image: none;
+  }
 }
 
 .crumb {
@@ -102,6 +131,9 @@
   max-height: 16rem;
   min-height: 0;
   overflow-y: auto;
+  /* Keep the 2px focus ring and its offset inside the scrolling list. */
+  padding: var(--space-1);
+  margin: calc(-1 * var(--space-1));
 }
 
 .rowShell {
@@ -138,6 +170,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+  scroll-margin-block-end: var(--space-3);
 }
 
 .current {

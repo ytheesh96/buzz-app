@@ -335,3 +335,81 @@ it("keeps the newest directory when an older request resolves late", async () =>
   );
   expect(screen.queryByRole("button", { name: /stale/ })).toBeNull();
 });
+
+it("reserves sticky dialog footer clearance and scrolls the action footer clear on load", async () => {
+  list.mockResolvedValue(project);
+  const scrollIntoView = vi.fn();
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = scrollIntoView;
+  const originalOffsetHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "offsetHeight",
+  );
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get() {
+      return this.classList.contains("buzz-dialog-actions") ? 92 : 0;
+    },
+  });
+  try {
+    const { container, unmount } = render(
+      <div className="buzz-dialog">
+        <div className="buzz-dialog-body">
+          <InlineRemoteFolderBrowser
+            machines={[machine]}
+            onSelect={vi.fn()}
+            onClose={vi.fn()}
+          />
+        </div>
+        <footer className="buzz-dialog-actions" />
+      </div>,
+    );
+    const dialog = container.querySelector<HTMLElement>(".buzz-dialog");
+    expect(dialog?.style.getPropertyValue("scroll-padding-block-end")).toBe(
+      "92px",
+    );
+    await screen.findByRole("button", { name: /stale/ });
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+
+    unmount();
+    expect(dialog?.style.getPropertyValue("scroll-padding-block-end")).toBe("");
+  } finally {
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+    if (originalOffsetHeight) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        "offsetHeight",
+        originalOffsetHeight,
+      );
+    } else {
+      delete (HTMLElement.prototype as { offsetHeight?: number }).offsetHeight;
+    }
+  }
+});
+
+it("pins overflowing breadcrumbs to the end segment and marks the current folder", async () => {
+  list.mockResolvedValue(project);
+  const { container } = render(
+    <InlineRemoteFolderBrowser
+      machines={[machine]}
+      onSelect={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
+  const nav = container.querySelector<HTMLElement>(
+    'nav[aria-label="Folder path"]',
+  );
+  expect(nav).not.toBeNull();
+  Object.defineProperty(nav, "clientWidth", { configurable: true, value: 110 });
+  Object.defineProperty(nav, "scrollWidth", { configurable: true, value: 260 });
+
+  await screen.findByRole("button", { name: /stale/ });
+
+  expect(nav?.scrollLeft).toBe(150);
+  expect(nav).toHaveAttribute("data-overflow-start");
+  expect(nav).not.toHaveAttribute("data-overflow-end");
+  expect(screen.getByRole("button", { name: "project" })).toHaveAttribute(
+    "aria-current",
+    "location",
+  );
+});

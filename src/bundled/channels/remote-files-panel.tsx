@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -540,6 +541,8 @@ export function registerRemoteFiles(ctx: Context) {
     const previewRequest = useRef(0);
     const previewAbort = useRef<AbortController | undefined>(undefined);
     const listingRef = useRef<Listing | undefined>(undefined);
+    const [crumbsNode, setCrumbsNode] = useState<HTMLElement | null>(null);
+    const crumbsPinned = useRef(true);
     const machine = machineId
       ? browsable.find(({ id }) => id === machineId)
       : undefined;
@@ -557,6 +560,41 @@ export function registerRemoteFiles(ctx: Context) {
     rootsRef.current = roots;
 
     const dirty = editing && draft !== (previewResult?.content ?? "");
+
+    const syncCrumbs = useCallback(
+      (pinEnd: boolean) => {
+        if (!crumbsNode) return;
+        if (pinEnd) {
+          crumbsNode.scrollLeft = Math.max(
+            0,
+            crumbsNode.scrollWidth - crumbsNode.clientWidth,
+          );
+        }
+        const start = crumbsNode.scrollLeft > 1;
+        const end =
+          crumbsNode.scrollLeft + crumbsNode.clientWidth <
+          crumbsNode.scrollWidth - 1;
+        crumbsNode.toggleAttribute("data-overflow-start", start);
+        crumbsNode.toggleAttribute("data-overflow-end", end);
+      },
+      [crumbsNode],
+    );
+
+    const displayPath = listing?.displayPath;
+    useLayoutEffect(() => {
+      if (!crumbsNode || !displayPath) return;
+      crumbsPinned.current = true;
+      syncCrumbs(true);
+    }, [crumbsNode, displayPath, syncCrumbs]);
+
+    useLayoutEffect(() => {
+      if (!crumbsNode || typeof ResizeObserver !== "function") return;
+      const observer = new ResizeObserver(() => {
+        syncCrumbs(crumbsPinned.current);
+      });
+      observer.observe(crumbsNode);
+      return () => observer.disconnect();
+    }, [crumbsNode, syncCrumbs]);
 
     useEffect(() => {
       setMachineId((current) => {
@@ -1015,6 +1053,7 @@ export function registerRemoteFiles(ctx: Context) {
     const currentInWorkspace = listing
       ? (roots ?? []).includes(listing.displayPath)
       : false;
+    const crumbs = listing ? remotePathCrumbs(listing.displayPath) : [];
 
     return (
       <div className={styles.panel}>
@@ -1074,9 +1113,20 @@ export function registerRemoteFiles(ctx: Context) {
                   if (listing?.parent) navigate(listing.parent);
                 }}
               />
-              <nav className={styles.crumbs} aria-label="Folder path">
+              <nav
+                ref={setCrumbsNode}
+                className={styles.crumbs}
+                aria-label="Folder path"
+                onScroll={() => {
+                  if (!crumbsNode) return;
+                  crumbsPinned.current =
+                    crumbsNode.scrollLeft + crumbsNode.clientWidth >=
+                    crumbsNode.scrollWidth - 1;
+                  syncCrumbs(false);
+                }}
+              >
                 {listing ? (
-                  remotePathCrumbs(listing.displayPath).map((crumb, index) => (
+                  crumbs.map((crumb, index) => (
                     <span key={crumb.path} className={styles.crumb}>
                       {index > 0 && (
                         <CaretRightIcon
@@ -1088,6 +1138,10 @@ export function registerRemoteFiles(ctx: Context) {
                       <Button
                         variant="link"
                         size="inline"
+                        title={crumb.path}
+                        aria-current={
+                          index === crumbs.length - 1 ? "location" : undefined
+                        }
                         onClick={() => navigate(crumb.path)}
                       >
                         {crumb.label}

@@ -705,3 +705,31 @@ it("adds a folder to the chat workspace without leaving the listing", async () =
   expect(await screen.findByText("In workspace")).toBeVisible();
   expect(sent("fs.list")).toHaveLength(listsBefore);
 });
+
+it("pins overflowing breadcrumbs to the end segment and tracks horizontal scroll edges", async () => {
+  renderPanel();
+  await findRow(/^src/);
+
+  const nav = screen.getByRole("navigation", { name: "Folder path" });
+  Object.defineProperty(nav, "clientWidth", { configurable: true, value: 120 });
+  Object.defineProperty(nav, "scrollWidth", { configurable: true, value: 280 });
+
+  // Trigger a path change so the breadcrumb layout effect pins to the trailing segment.
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "~" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "~" })).toHaveAttribute(
+      "aria-current",
+      "location",
+    ),
+  );
+
+  expect(nav.scrollLeft).toBe(160);
+  expect(nav).toHaveAttribute("data-overflow-start");
+  expect(nav).not.toHaveAttribute("data-overflow-end");
+
+  nav.scrollLeft = 0;
+  nav.dispatchEvent(new Event("scroll"));
+  expect(nav).not.toHaveAttribute("data-overflow-start");
+  expect(nav).toHaveAttribute("data-overflow-end");
+});
