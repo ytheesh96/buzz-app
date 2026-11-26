@@ -4,6 +4,21 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createRef } from "react";
+
+const tauri = vi.hoisted(() => ({
+  isTauri: vi.fn<() => boolean>(() => false),
+  invoke:
+    vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: tauri.isTauri,
+  invoke: tauri.invoke,
+  Channel: class {
+    onmessage: ((event: unknown) => void) | undefined;
+  },
+}));
+
 import { MachineEditorDialog } from "./RemoteMachinesSettings";
 import { ProviderDialog } from "../bundled/agents/ProviderDialog";
 import { selfHostedProvider } from "../bundled/self-hosted-provider";
@@ -78,6 +93,8 @@ beforeEach(() => {
   StubWebSocket.mode = "ok";
   StubWebSocket.helloExtra = {};
   vi.stubGlobal("WebSocket", StubWebSocket);
+  tauri.isTauri.mockReturnValue(false);
+  tauri.invoke.mockReset();
 });
 
 afterEach(() => {
@@ -386,4 +403,91 @@ it("keeps a tokened discovered card separate when adding a tokenless admin URL f
     url: "wss://mac-mini.example.org/_buzz-host",
     token: "bha_guest",
   });
+});
+
+it("sets up a machine over SSH, shows progress and the sign-in hint, and saves its forward", async () => {
+  const user = userEvent.setup();
+  tauri.isTauri.mockReturnValue(true);
+  let finish: (() => void) | undefined;
+  tauri.invoke.mockImplementation(async (cmd, args) => {
+    if (cmd === "ssh_config_hosts") return ["mini", "work-box"];
+    if (cmd === "ssh_machine_setup") {
+      const progress = args?.onProgress as {
+        onmessage?: (event: unknown) => void;
+      };
+      progress.onmessage?.({ kind: "step", step: "connect" });
+      progress.onmessage?.({ kind: "step", step: "start" });
+      progress.onmessage?.({ kind: "log", line: "starting buzz-host" });
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return {
+        version: "0.1.0",
+        url: "ws://127.0.0.1:8467",
+        token: "bha_ssh",
+        previousVersion: "0.1.0",
+        installed: false,
+        platform: "darwin",
+        tunnelPort: 8467,
+      };
+    }
+    if (cmd === "ssh_tunnel_open")
+      return {
+        machineId: args?.machineId,
+        state: "connected",
+        localPort: 40123,
+      };
+    return undefined;
+  });
+  renderManager();
+  await user.click(screen.getByRole("button", { name: "Add machine" }));
+  await user.click(screen.getByRole("tab", { name: "SSH" }));
+
+  const host = screen.getByRole("combobox", { name: "SSH host" });
+  await user.type(host, "-oProxyCommand=id");
+  // The open host list hides the rest from assistive tech; a pointer click
+  // still reaches the button.
+  await user.click(
+    screen.getByRole("button", { name: "Set up and save", hidden: true }),
+  );
+  expect(host).toHaveValue("-oProxyCommand=id");
+  expect(
+    screen.getByText("Enter a host from your ~/.ssh/config, or user@host."),
+  ).toBeVisible();
+  expect(tauri.invoke).not.toHaveBeenCalledWith(
+    "ssh_machine_setup",
+    expect.anything(),
+  );
+
+  await user.clear(host);
+  await user.type(host, "mi");
+  await user.click(await screen.findByRole("option", { name: "mini" }));
+  expect(host).toHaveValue("mini");
+  await user.click(screen.getByRole("button", { name: "Set up and save" }));
+  expect(await screen.findByText("starting buzz-host")).toBeVisible();
+  expect(screen.getByText("Start buzz-host")).toBeVisible();
+  expect(tauri.invoke).toHaveBeenCalledWith(
+    "ssh_machine_setup",
+    expect.objectContaining({ target: "mini", releaseDir: null }),
+  );
+  finish?.();
+
+  expect(
+    await screen.findByText("buzz-host 0.1.0 is running on mini."),
+  ).toBeVisible();
+  expect(screen.getByRole("status").textContent).toContain("codex login");
+  expect(remoteMachinesSnapshot()).toEqual([
+    expect.objectContaining({
+      name: "mini",
+      token: "bha_ssh",
+      url: "ws://127.0.0.1:40123",
+      routes: [
+        { type: "ssh", target: "mini", remotePort: 8467, localPort: 40123 },
+      ],
+    }),
+  ]);
+
+  await user.click(screen.getByRole("button", { name: "Done" }));
+  expect(await screen.findByText("SSH")).toBeVisible();
+  expect(screen.getByText(/^mini · /)).toBeVisible();
 });

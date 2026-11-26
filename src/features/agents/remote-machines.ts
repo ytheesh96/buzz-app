@@ -17,7 +17,17 @@ export const DISCOVERY_FRESHNESS_MS = 120_000;
 
 export type RemoteMachineRoute =
   | Readonly<{ type: "wss"; url: string }>
-  | Readonly<{ type: "iroh"; nodeId: string; endpointAddr?: string }>;
+  | Readonly<{ type: "iroh"; nodeId: string; endpointAddr?: string }>
+  | SshMachineRoute;
+
+/** A machine reached through the app's own `ssh -L` forward: `localPort` on
+ * this computer to `remotePort` on the remote's loopback. */
+export type SshMachineRoute = Readonly<{
+  type: "ssh";
+  target: string;
+  remotePort: number;
+  localPort: number;
+}>;
 
 export type RemoteMachineSource = "manual" | "discovered";
 
@@ -105,6 +115,40 @@ export function formatPlatformLabel(platform: string | undefined): string {
   return platform;
 }
 
+/** `user@host` or a `~/.ssh/config` alias; never a leading `-` (an ssh option). */
+export function isValidSshTarget(target: string): boolean {
+  return (
+    target.length > 0 &&
+    target.length <= 255 &&
+    !target.startsWith("-") &&
+    !target.endsWith("@") &&
+    (target.match(/@/g)?.length ?? 0) <= 1 &&
+    /^[A-Za-z0-9._@:%[\]-]+$/.test(target)
+  );
+}
+
+/** The loopback URL of an SSH machine's local forward. */
+export function sshLoopbackUrl(localPort: number): string {
+  return `ws://127.0.0.1:${localPort}`;
+}
+
+export function sshRoute(
+  machine: Pick<RemoteMachine, "routes">,
+): SshMachineRoute | undefined {
+  return machine.routes.find(
+    (route): route is SshMachineRoute => route.type === "ssh",
+  );
+}
+
+function isPort(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= 65535
+  );
+}
+
 /** First configured `wss` route URL for a machine (or legacy `machine.url`). */
 export function primaryWssUrl(
   machine: Pick<RemoteMachine, "url" | "routes">,
@@ -112,7 +156,8 @@ export function primaryWssUrl(
   for (const route of machine.routes) {
     if (route.type === "wss" && route.url) return route.url;
   }
-  return machine.url;
+  // An SSH machine's `url` is its local forward, not an address to show or edit.
+  return sshRoute(machine) ? "" : machine.url;
 }
 
 /**
@@ -190,6 +235,21 @@ function normalizeRoute(raw: unknown): RemoteMachineRoute | null {
       ...(endpointAddr ? { endpointAddr } : {}),
     });
   }
+  if (item.type === "ssh") {
+    const target = typeof item.target === "string" ? item.target.trim() : "";
+    if (
+      !isValidSshTarget(target) ||
+      !isPort(item.remotePort) ||
+      !isPort(item.localPort)
+    )
+      return null;
+    return Object.freeze({
+      type: "ssh",
+      target,
+      remotePort: item.remotePort,
+      localPort: item.localPort,
+    });
+  }
   return null;
 }
 
@@ -206,13 +266,19 @@ function normalizeRoutes(
       const key =
         normalized.type === "wss"
           ? `wss:${normalized.url}`
-          : `iroh:${normalized.nodeId}`;
+          : normalized.type === "iroh"
+            ? `iroh:${normalized.nodeId}`
+            : "ssh";
       if (seen.has(key)) continue;
       seen.add(key);
       routes.push(normalized);
     }
   }
-  if (fallbackUrl && !routes.some((route) => route.type === "wss")) {
+  // An SSH machine's `url` is its local forward, not a route of its own.
+  if (
+    fallbackUrl &&
+    !routes.some((route) => route.type === "wss" || route.type === "ssh")
+  ) {
     routes.push(Object.freeze({ type: "wss", url: fallbackUrl }));
   }
   return Object.freeze(routes);
@@ -253,7 +319,10 @@ function normalizeMachine(raw: unknown): RemoteMachine | null {
   const routes = normalizeRoutes(item.routes, rawUrl);
   if (!id || routes.length === 0) return null;
   const wssRoute = routes.find((route) => route.type === "wss");
-  const url = rawUrl || wssRoute?.url || "";
+  const ssh = routes.find((route) => route.type === "ssh");
+  const url = ssh
+    ? sshLoopbackUrl(ssh.localPort)
+    : rawUrl || wssRoute?.url || "";
   const name =
     typeof item.name === "string" && item.name.trim()
       ? item.name.trim()
@@ -1343,7 +1412,9 @@ export function useRemoteMachineStatuses(): Readonly<
 type WebSocketConstructor = new (url: string) => WebSocket;
 
 /** The native tunnel's `ws://127.0.0.1:<port>/t/…` URLs (never user input). */
-const LOOPBACK_TUNNEL_URL = /^ws:\/\/127\.0\.0\.1:\d{1,5}\/t\//;
+/** The app's own loopback forwards: the Iroh tunnel (`/t/…`) and an SSH
+ * machine's forward (the listener's root). */
+const LOOPBACK_TUNNEL_URL = /^ws:\/\/127\.0\.0\.1:\d{1,5}(?:\/t\/|\/?$)/;
 
 /**
  * Connect to a buzz-host endpoint, authenticate if a token is supplied, call
@@ -1362,7 +1433,7 @@ export async function probeRemoteMachine({
   signal?: AbortSignal;
   timeoutMs?: number;
   WebSocketImpl?: WebSocketConstructor;
-  /** Also accept the native Iroh tunnel's loopback URL. */
+  /** Also accept the app's loopback forwards (Iroh tunnel, SSH). */
   allowLoopbackTunnel?: boolean;
 }): Promise<RemoteMachineProbeResult> {
   if (signal?.aborted) {
@@ -1572,7 +1643,7 @@ export async function refreshRemoteMachine(
       const result = await probeRemoteMachine({
         url: candidate.url,
         token: machine.token,
-        allowLoopbackTunnel: candidate.routeType === "iroh",
+        allowLoopbackTunnel: candidate.routeType !== "wss",
         ...options,
       });
       recordProbe(id, result, candidate.routeType);

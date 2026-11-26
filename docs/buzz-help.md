@@ -1624,7 +1624,17 @@ If an agent reports incompatible synced settings, choose the **Previous Versions
   With the Remote Agents plugin enabled, **Self-hosted** is listed beside
   Builderlab. Its dialog adds, checks, edits and removes the Linux or macOS
   machines running buzz-host that this app connects to; a pairing link
-  (`wss://…#token=…`) fills in the access token. **Run on** in Create agent
+  (`wss://…#token=…`) fills in the access token. In the desktop app, **Add
+  machine → SSH** sets up a computer you reach with your own `ssh` instead:
+  pick a host from `~/.ssh/config` or type `user@host` (it must connect
+  without a password prompt, using a key or ssh-agent). Leave **Release
+  folder** empty to start the buzz-host already installed there, or choose a
+  folder with `install.sh`, the buzz-host bundle and `SHA256SUMS` to install or
+  upgrade it. Buzz then keeps an SSH tunnel to that machine open while the app
+  runs, reconnects it when it drops, and shows **SSH** and its connection state
+  on the machine's row. Agents keep running there while the tunnel is down.
+  They use that computer's own Claude Code or Codex sign-in, so sign in there
+  first. **Run on** in Create agent
   picks one of these machines or this computer; **Harness** then picks from
   the harnesses that run there.
   Claude uses your own Claude setup when one already works on this computer,
