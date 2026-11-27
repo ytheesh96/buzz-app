@@ -25,6 +25,11 @@ import { selfHostedProvider } from "../bundled/self-hosted-provider";
 import type { RegisteredAgentType } from "../features/agents/service";
 import { CloudIcon } from "../shared/design-system/icons";
 import {
+  offerMachinePairing,
+  parseMachinePairingLink,
+  peekMachinePairing,
+} from "../features/agents/machine-pairing";
+import {
   addRemoteMachine,
   remoteMachinesSnapshot,
   resetRemoteMachinesCache,
@@ -490,4 +495,72 @@ it("sets up a machine over SSH, shows progress and the sign-in hint, and saves i
   await user.click(screen.getByRole("button", { name: "Done" }));
   expect(await screen.findByText("SSH")).toBeVisible();
   expect(screen.getByText(/^mini · /)).toBeVisible();
+});
+
+it("opens Add machine prefilled from a buzz://pair link and saves only after the user confirms", async () => {
+  const user = userEvent.setup();
+  const pairing = parseMachinePairingLink(
+    "buzz://pair?url=ws%3A%2F%2F127.0.0.1%3A8467&name=Studio#token=bha_0123456789abcdef",
+  );
+  if (!pairing) throw new Error("expected a pairing");
+  offerMachinePairing(pairing);
+  renderManager();
+
+  const urlInput = await screen.findByLabelText(
+    "Pairing link or server address",
+  );
+  expect(urlInput).toHaveValue("ws://127.0.0.1:8467");
+  expect(screen.getByLabelText(/Machine name/)).toHaveValue("Studio");
+  expect(screen.getByText("Access token detected")).toBeVisible();
+  expect(screen.getByText(/Opened from a pairing link/)).toBeVisible();
+  expect(peekMachinePairing()).toBeUndefined();
+  // Nothing is saved until Connect and save.
+  expect(remoteMachinesSnapshot()).toHaveLength(0);
+
+  await user.click(screen.getByRole("button", { name: "Connect and save" }));
+  expect(await screen.findByText("Studio")).toBeVisible();
+  expect(remoteMachinesSnapshot()).toMatchObject([
+    {
+      name: "Studio",
+      url: "ws://127.0.0.1:8467",
+      token: "bha_0123456789abcdef",
+    },
+  ]);
+});
+
+it("cancelling a pairing link's Add machine saves nothing", async () => {
+  const user = userEvent.setup();
+  const pairing = parseMachinePairingLink(
+    "buzz://pair?url=wss%3A%2F%2Fbox.example.org#token=bha_0123456789abcdef",
+  );
+  if (!pairing) throw new Error("expected a pairing");
+  renderManager();
+  expect(screen.getByText("No remote machines connected")).toBeVisible();
+  // A link that arrives while the dialog is open shows too.
+  offerMachinePairing(pairing);
+  expect(
+    await screen.findByLabelText("Pairing link or server address"),
+  ).toHaveValue("wss://box.example.org");
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.getByText("No remote machines connected")).toBeVisible();
+  expect(remoteMachinesSnapshot()).toHaveLength(0);
+});
+
+it("refuses to switch a wss:// machine to plaintext ws:// when editing", async () => {
+  const user = userEvent.setup();
+  addRemoteMachine({
+    name: "Box",
+    url: "wss://box.example.org/_buzz-host",
+    token: "bha_secret",
+  });
+  renderManager();
+  await user.click(screen.getByRole("button", { name: "Edit Box" }));
+  const urlInput = screen.getByLabelText("Pairing link or server address");
+  await user.clear(urlInput);
+  await user.type(urlInput, "ws://127.0.0.1:8467");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText(/paired over wss:\/\//)).toBeVisible();
+  expect(remoteMachinesSnapshot()[0]?.url).toBe(
+    "wss://box.example.org/_buzz-host",
+  );
 });

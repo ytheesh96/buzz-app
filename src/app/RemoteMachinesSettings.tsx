@@ -9,6 +9,12 @@ import {
 } from "react";
 import { resolveMachineWebSocketCandidates } from "../features/agents/iroh-tunnel";
 import {
+  peekMachinePairing,
+  subscribeMachinePairing,
+  takeMachinePairing,
+  type MachinePairing,
+} from "../features/agents/machine-pairing";
+import {
   ProviderDialogActions,
   ProviderDialogFooter,
 } from "../features/agents/ProviderDialogActions";
@@ -18,6 +24,7 @@ import {
   deriveMachineName,
   findDiscoveredMachineMatch,
   formatPlatformLabel,
+  isInsecureDowngrade,
   parseMachineInput,
   primaryWssUrl,
   probeRemoteMachine,
@@ -104,11 +111,13 @@ type AddMethod = "link" | "ssh";
 
 /** Add a machine by pairing link or over SSH. */
 function AddMachineForm({
+  pairing,
   inputRef,
   onCancel,
   onSaved,
   onPendingChange,
 }: {
+  pairing?: MachinePairing | undefined;
   inputRef: RefObject<HTMLInputElement | null>;
   onCancel(): void;
   onSaved(machine: RemoteMachine): void;
@@ -141,6 +150,7 @@ function AddMachineForm({
           />
         ) : (
           <MachineEditorForm
+            pairing={pairing}
             urlInputRef={inputRef}
             onCancel={onCancel}
             onSaved={onSaved}
@@ -155,12 +165,15 @@ function AddMachineForm({
 /** Add, or edit with the form that matches how the machine connects. */
 function MachineForm({
   machine,
+  pairing,
   inputRef,
   onCancel,
   onSaved,
   onPendingChange,
 }: {
   machine?: RemoteMachine | undefined;
+  /** A `buzz://pair` link's prefill for Add machine (never saved unconfirmed). */
+  pairing?: MachinePairing | undefined;
   inputRef: RefObject<HTMLInputElement | null>;
   onCancel(): void;
   onSaved(machine: RemoteMachine): void;
@@ -169,6 +182,7 @@ function MachineForm({
   if (!machine)
     return (
       <AddMachineForm
+        pairing={pairing}
         inputRef={inputRef}
         onCancel={onCancel}
         onSaved={onSaved}
@@ -209,12 +223,14 @@ function formSubtitle(machine: RemoteMachine | undefined): string {
  * surrounding dialog's footer through ProviderDialogActions. */
 export function MachineEditorForm({
   machine,
+  pairing,
   urlInputRef,
   onCancel,
   onSaved,
   onPendingChange,
 }: {
   machine?: RemoteMachine | undefined;
+  pairing?: MachinePairing | undefined;
   urlInputRef: RefObject<HTMLInputElement | null>;
   onCancel(): void;
   onSaved(machine: RemoteMachine): void;
@@ -222,12 +238,16 @@ export function MachineEditorForm({
 }) {
   const editing = Boolean(machine);
   const irohOnlyCapable = hasIrohRoute(machine);
-  const [rawUrl, setRawUrl] = useState(machine ? primaryWssUrl(machine) : "");
-  const [name, setName] = useState(machine?.name ?? "");
-  const [token, setToken] = useState(machine?.token ?? "");
+  const [rawUrl, setRawUrl] = useState(
+    machine ? primaryWssUrl(machine) : (pairing?.url ?? ""),
+  );
+  const [name, setName] = useState(machine?.name ?? pairing?.name ?? "");
+  const [token, setToken] = useState(machine?.token ?? pairing?.token ?? "");
   // A token that arrived with a pairing link, or that is already saved, is
   // shown as detected instead of as a field to retype.
-  const [tokenDetected, setTokenDetected] = useState(Boolean(machine?.token));
+  const [tokenDetected, setTokenDetected] = useState(
+    Boolean(machine?.token ?? pairing?.token),
+  );
   const [urlError, setUrlError] = useState<string | undefined>();
   const [submitError, setSubmitError] = useState("");
   const [probeFailed, setProbeFailed] = useState(false);
@@ -347,6 +367,13 @@ export function MachineEditorForm({
       }
       cleanUrl = parsed.url;
       cleanToken = (parsed.token ?? token).trim();
+      if (machine && isInsecureDowngrade(primaryWssUrl(machine), cleanUrl)) {
+        setUrlError(
+          "This machine was paired over wss://, so Buzz won't switch it to ws://. Add this computer as a separate machine instead.",
+        );
+        urlInputRef.current?.focus();
+        return;
+      }
     }
     if (skipCheck) {
       persist(cleanUrl, cleanToken);
@@ -413,7 +440,7 @@ export function MachineEditorForm({
           description={
             irohOnlyCapable
               ? "Optional backup address. This machine already connects directly."
-              : "Paste the link from your machine, or type its wss:// address."
+              : "Paste the link from your machine, or type its wss:// address. For buzz-host on this computer, ws://127.0.0.1:<port> also works."
           }
           error={urlError}
         >
@@ -469,6 +496,12 @@ export function MachineEditorForm({
               }}
             />
           </Field>
+        )}
+        {pairing && !editing && (
+          <p className="m-0 text-body-sm text-secondary">
+            Opened from a pairing link. Check the address, then connect to save
+            this machine.
+          </p>
         )}
         {submitError && (
           <p role="alert" className="m-0 text-body-sm text-danger">
@@ -555,7 +588,23 @@ export function RemoteMachinesManager() {
   const machines = useRemoteMachines();
   const statuses = useRemoteMachineStatuses();
   const tunnels = useSshTunnelStates();
-  const [view, setView] = useState<ManagerView>({ kind: "list" });
+  // A `buzz://pair` link opens Add machine prefilled. Read in render, consumed
+  // once shown, so a link that arrives while the dialog is open shows too.
+  const [pairing, setPairing] = useState(peekMachinePairing);
+  const [view, setView] = useState<ManagerView>(() =>
+    peekMachinePairing() ? { kind: "add" } : { kind: "list" },
+  );
+  useEffect(() => {
+    const show = () => {
+      const next = peekMachinePairing();
+      if (!next) return;
+      takeMachinePairing(next.id);
+      setPairing(next);
+      setView({ kind: "add" });
+    };
+    show();
+    return subscribeMachinePairing(show);
+  }, []);
   const urlInputRef = useRef<HTMLInputElement>(null);
   const removeCancelRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -569,7 +618,10 @@ export function RemoteMachinesManager() {
     returnFocus.current = trigger;
     setView(next);
   };
-  const back = () => setView({ kind: "list" });
+  const back = () => {
+    setPairing(undefined);
+    setView({ kind: "list" });
+  };
 
   useLayoutEffect(() => {
     if (view.kind === "add" || view.kind === "edit")
@@ -735,8 +787,13 @@ export function RemoteMachinesManager() {
             )}
           />
           <MachineForm
-            key={view.kind === "edit" ? view.machine.id : "add"}
+            key={
+              view.kind === "edit"
+                ? view.machine.id
+                : `add-${pairing?.id ?? "manual"}`
+            }
             machine={view.kind === "edit" ? view.machine : undefined}
+            pairing={view.kind === "add" ? pairing : undefined}
             inputRef={urlInputRef}
             onCancel={back}
             onSaved={back}
