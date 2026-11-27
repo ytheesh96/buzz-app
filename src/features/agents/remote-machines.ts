@@ -99,6 +99,8 @@ export function deriveMachineName(url: string): string {
     const parsed = new URL(url);
     const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
     if (!hostname) return "Remote machine";
+    if (parsed.protocol === "ws:" && LOOPBACK_HOSTS.has(parsed.hostname))
+      return "This computer";
     if (/^\d+(?:\.\d+){3}$/.test(hostname) || hostname.includes(":")) {
       return hostname;
     }
@@ -184,9 +186,23 @@ export function preferredRoute(
   return machine.routes[0];
 }
 
+/** Hosts that name this computer. `ws://` is allowed only to these. */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * True when moving a machine from `from` to `to` would trade `wss://` for
+ * plaintext `ws://`. Buzz never does that silently: the token was shared
+ * over TLS and must not start travelling in the clear.
+ */
+export function isInsecureDowngrade(from: string, to: string): boolean {
+  return /^wss:\/\//i.test(from.trim()) && /^ws:\/\//i.test(to.trim());
+}
+
 /**
  * Parse a Server URL or 1-paste pairing link (`wss://host/_buzz-host#token=bha_...`).
- * Enforces `wss://` because Buzz's WebView CSP only permits secure WebSockets.
+ * Other computers need `wss://`. This computer may also use plaintext
+ * `ws://127.0.0.1:<port>` (or `localhost` / `[::1]`), saved as `127.0.0.1`
+ * because Buzz's WebView CSP permits only that plaintext WebSocket origin.
  */
 export function parseMachineInput(raw: string): ParsedMachineInput {
   const text = String(raw ?? "").trim();
@@ -211,11 +227,32 @@ export function parseMachineInput(raw: string): ParsedMachineInput {
       error: "Enter a valid wss:// URL (or paste a pairing link).",
     };
   }
+  if (parsed.protocol === "ws:") {
+    if (
+      !LOOPBACK_HOSTS.has(parsed.hostname) ||
+      !parsed.port ||
+      parsed.username ||
+      parsed.password
+    ) {
+      return {
+        url: base,
+        token,
+        error:
+          "Use wss:// for other computers. Plain ws:// works only for this computer, as ws://127.0.0.1:<port>.",
+      };
+    }
+    const path = parsed.pathname === "/" ? "" : parsed.pathname;
+    return {
+      url: `ws://127.0.0.1:${parsed.port}${path}${parsed.search}`,
+      token,
+    };
+  }
   if (parsed.protocol !== "wss:") {
     return {
       url: base,
       token,
-      error: "Server URL must start with wss://.",
+      error:
+        "Server URL must start with wss:// (or ws://127.0.0.1:<port> for this computer).",
     };
   }
   return { url: base, token };
@@ -742,6 +779,11 @@ export function updateRemoteMachine(
       ? [...nonWss, Object.freeze({ type: "wss" as const, url: cleanUrl })]
       : nonWss;
   }
+  const nextWss = nextRoutes.find((route) => route.type === "wss")?.url ?? "";
+  if (isInsecureDowngrade(primaryWssUrl(current), nextWss))
+    throw new Error(
+      "This machine was paired over wss://, so Buzz won't switch it to ws://. Add this computer as a separate machine instead.",
+    );
   const updated = normalizeMachine({
     ...current,
     ...patch,
@@ -1012,7 +1054,11 @@ export function mergeDiscoveredMachine(
 ): RemoteMachine | undefined {
   const machineId = input.machineId.trim();
   if (!machineId) return undefined;
-  const incomingRoutes = normalizeRoutes(input.routes, "");
+  // A machine's own ws:// URL names its loopback, not this computer's: only
+  // wss:// addresses are usable from here.
+  const incomingRoutes = normalizeRoutes(input.routes, "").filter(
+    (route) => route.type !== "wss" || /^wss:\/\//i.test(route.url),
+  );
   const incomingWss =
     incomingRoutes.find((route) => route.type === "wss")?.url ?? "";
   const incomingCanonical = canonicalWssUrl(incomingWss);

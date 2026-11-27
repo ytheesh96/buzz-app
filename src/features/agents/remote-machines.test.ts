@@ -24,6 +24,7 @@ import {
   agentHostMapSnapshot,
   deriveMachineName,
   formatPlatformLabel,
+  isInsecureDowngrade,
   isValidSshTarget,
   machineForAgent,
   mergeAgentMachines,
@@ -134,6 +135,81 @@ describe("remote-machines", () => {
       /wss:\/\//,
     );
     expect(parseMachineInput("   ").error).toMatch(/Enter a server URL/);
+  });
+
+  it("accepts plaintext ws:// only for this computer's loopback, saved as 127.0.0.1", () => {
+    expect(parseMachineInput("ws://127.0.0.1:8467#token=bha_abc123")).toEqual({
+      url: "ws://127.0.0.1:8467",
+      token: "bha_abc123",
+    });
+    expect(parseMachineInput("ws://localhost:8467/_buzz-host")).toEqual({
+      url: "ws://127.0.0.1:8467/_buzz-host",
+      token: undefined,
+    });
+    expect(parseMachineInput("ws://[::1]:9000/")).toEqual({
+      url: "ws://127.0.0.1:9000",
+      token: undefined,
+    });
+    for (const insecure of [
+      "ws://box.example.org:8467",
+      "ws://192.168.1.20:8467",
+      "ws://127.0.0.1",
+      "ws://user:pw@127.0.0.1:8467",
+      "ws://localhost.example.org:8467",
+    ])
+      expect(parseMachineInput(insecure).error, insecure).toMatch(
+        /wss:\/\/ for other computers/,
+      );
+    expect(deriveMachineName("ws://127.0.0.1:8467")).toBe("This computer");
+  });
+
+  it("never silently downgrades a wss:// machine to ws://", () => {
+    const machine = addRemoteMachine({
+      name: "Box",
+      url: "wss://box.example.org/_buzz-host",
+      token: "bha_secret",
+    });
+    expect(isInsecureDowngrade("wss://a.example", "ws://127.0.0.1:1")).toBe(
+      true,
+    );
+    expect(isInsecureDowngrade("ws://127.0.0.1:1", "wss://a.example")).toBe(
+      false,
+    );
+    expect(isInsecureDowngrade("", "ws://127.0.0.1:1")).toBe(false);
+    expect(() =>
+      updateRemoteMachine(machine.id, { url: "ws://127.0.0.1:8467" }),
+    ).toThrow(/paired over wss:\/\//);
+    expect(() =>
+      updateRemoteMachine(machine.id, {
+        routes: [{ type: "wss", url: "ws://127.0.0.1:8467" }],
+      }),
+    ).toThrow(/paired over wss:\/\//);
+    expect(remoteMachinesSnapshot()[0]?.url).toBe(
+      "wss://box.example.org/_buzz-host",
+    );
+    // A loopback machine can still move to wss://.
+    const local = addRemoteMachine({
+      url: "ws://127.0.0.1:8467",
+      token: "bha_x",
+    });
+    expect(local.name).toBe("This computer");
+    expect(
+      updateRemoteMachine(local.id, { url: "wss://box.example.org/x" })?.url,
+    ).toBe("wss://box.example.org/x");
+  });
+
+  it("drops discovered ws:// routes: they name the other machine's loopback", () => {
+    const merged = mergeDiscoveredMachine({
+      machineId: "11111111-2222-4333-8444-555555555555",
+      name: "Remote",
+      routes: [
+        { type: "wss", url: "ws://127.0.0.1:8467" },
+        { type: "iroh", nodeId: "node-1" },
+      ],
+      publicGuestUrl: "ws://127.0.0.1:8467",
+    });
+    expect(merged?.routes).toEqual([{ type: "iroh", nodeId: "node-1" }]);
+    expect(merged?.url).toBe("");
   });
 
   it("derives readable machine names and platform labels", () => {
@@ -537,7 +613,7 @@ describe("remote-machines", () => {
     expect(remoteMachineStatusesSnapshot()[manual.id]?.state).toBe("online");
   });
 
-  it("gates loopback tunnel ws:// URLs unless allowLoopbackTunnel is enabled", async () => {
+  it("accepts loopback ws:// (this computer, or the app's tunnels) and rejects other plaintext hosts", async () => {
     FakeWebSocket.handler = (ws, msg) => {
       if (msg.method === "hello") {
         ws.reply(msg.id, {
@@ -550,12 +626,13 @@ describe("remote-machines", () => {
     };
 
     const loopbackUrl = "ws://127.0.0.1:44444/t/deadbeef/m_1";
+    // buzz-host on this computer is reachable over plaintext loopback.
     await expect(
       probeRemoteMachine({
-        url: loopbackUrl,
+        url: "ws://localhost:44444",
         WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
       }),
-    ).rejects.toThrow(/wss:\/\//);
+    ).resolves.toMatchObject({ host: "iroh-box" });
 
     const probed = await probeRemoteMachine({
       url: loopbackUrl,
@@ -564,11 +641,10 @@ describe("remote-machines", () => {
     });
     expect(probed).toMatchObject({ host: "iroh-box", platform: "linux" });
 
-    // Non-tunnel loopback and non-loopback ws:// URLs remain rejected even when gated on.
+    // Non-loopback ws:// URLs stay rejected, with or without the tunnel flag.
     await expect(
       probeRemoteMachine({
-        url: "ws://127.0.0.1:44444/other",
-        allowLoopbackTunnel: true,
+        url: "ws://evil.example.org:44444/other",
         WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
       }),
     ).rejects.toThrow(/wss:\/\//);

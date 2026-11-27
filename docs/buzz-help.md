@@ -1624,7 +1624,12 @@ If an agent reports incompatible synced settings, choose the **Previous Versions
   With the Remote Agents plugin enabled, **Self-hosted** is listed beside
   Builderlab. Its dialog adds, checks, edits and removes the Linux or macOS
   machines running buzz-host that this app connects to; a pairing link
-  (`wss://…#token=…`) fills in the access token. In the desktop app, **Add
+  (`wss://…#token=…`) fills in the access token. Other computers need a
+  `wss://` address; buzz-host on this computer also works as
+  `ws://127.0.0.1:<port>`. A machine added over `wss://` is never switched
+  to `ws://`. Opening a `buzz://pair?url=…#token=…` link (`buzz-host pair`
+  prints one) opens **Add machine** with the address, name and token filled
+  in. Nothing is saved until you choose **Connect and save**. In the desktop app, **Add
   machine → SSH** sets up a computer you reach with your own `ssh` instead:
   pick a host from `~/.ssh/config` or type `user@host` (it must connect
   without a password prompt, using a key or ssh-agent). Leave **Release

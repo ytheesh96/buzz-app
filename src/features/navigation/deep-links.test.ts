@@ -15,6 +15,10 @@ import {
   type OpenResult,
 } from "./controller";
 import { createMemoryHistory } from "./history";
+import {
+  peekMachinePairing,
+  takeMachinePairing,
+} from "../agents/machine-pairing";
 
 const native = vi.hoisted(() => ({ value: false }));
 const invoked = vi.hoisted(() => ({
@@ -1278,6 +1282,54 @@ it("opens a warm plugin link through the navigation host", async () => {
         })}`,
       ]),
     );
+  } finally {
+    t.stop();
+  }
+});
+
+const pairLink =
+  "buzz://pair?url=wss%3A%2F%2Fbox.example.org%2F_buzz-host&name=Box#token=bha_0123456789abcdef";
+it.each(["viewer", "selected"] as const)(
+  "opens Self-hosted Add machine for a pairing link, across a %s change, without the token in the target",
+  async (key) => {
+    const t = harness({ ...ready, status: "loading" }, [pairLink]);
+    try {
+      await vi.waitFor(() => expect(t.take).toHaveBeenCalledTimes(1));
+      t.become({
+        ...ready,
+        [key]: key === "viewer" ? "f".repeat(64) : elsewhere,
+      });
+      await vi.waitFor(() =>
+        expect(t.host.navigation.open).toHaveBeenCalledTimes(1),
+      );
+      expect(t.host.fail).not.toHaveBeenCalled();
+      expect(t.host.rejected).not.toHaveBeenCalled();
+      expect(t.host.navigation.snapshot().entry.target).toEqual({
+        version: 1,
+        kind: "settings",
+        section: "agents",
+        provider: "local.buzz-host/omarchy",
+      });
+      expect(t.log.join("\n")).not.toContain("bha_");
+      const pairing = peekMachinePairing();
+      expect(pairing).toMatchObject({
+        url: "wss://box.example.org/_buzz-host",
+        token: "bha_0123456789abcdef",
+        name: "Box",
+      });
+      if (pairing) takeMachinePairing(pairing.id);
+    } finally {
+      t.stop();
+    }
+  },
+);
+it("rejects a pairing link for a plaintext remote host", async () => {
+  const t = harness(ready, [
+    "buzz://pair?url=ws%3A%2F%2Fbox.example.org%3A8467#token=bha_0123456789abcdef",
+  ]);
+  try {
+    await vi.waitFor(() => expect(t.host.rejected).toHaveBeenCalledTimes(1));
+    expect(peekMachinePairing()).toBeUndefined();
   } finally {
     t.stop();
   }

@@ -16,6 +16,12 @@ import {
   type ExternalAuthorization,
 } from "../agents/external-connection";
 import { isSignInLink, requestSignIn } from "../identity/sign-in-requests";
+import {
+  offerMachinePairing,
+  parseMachinePairingLink,
+  SELF_HOSTED_SETTINGS_TARGET,
+  type MachinePairing,
+} from "../agents/machine-pairing";
 
 export type DeepLinkStep =
   | Readonly<{ open: OpenTarget }>
@@ -153,6 +159,9 @@ export function bindDeepLinks(
         url: string;
         invite: InviteLink | null;
         authorization: ExternalAuthorization | null;
+        pairing: MachinePairing | null;
+        /** Belongs to this device, not an account: plugin installs and
+         * machine pairings bind to no viewer or community. */
         plugin: boolean;
         /** Names no destination, so no account or community binds it. */
         invalid: boolean;
@@ -221,6 +230,12 @@ export function bindDeepLinks(
     }
     if (client.status === "loading")
       return Promise.resolve({ status: "failed", reason: "unavailable" });
+    if (incoming.pairing) {
+      // Only prefills Add machine; the user confirms before anything is saved.
+      held = undefined;
+      offerMachinePairing(incoming.pairing);
+      return host.navigation.open(SELF_HOSTED_SETTINGS_TARGET);
+    }
     const invite = incoming.invite;
     if (incoming.authorization) {
       if (!client.viewer || client.status !== "ready")
@@ -315,7 +330,9 @@ export function bindDeepLinks(
           requestSignIn();
           continue;
         }
-        const plugin = parseBuzzLink(url)?.format === "plugin-install";
+        const pairing = parseMachinePairingLink(url);
+        const plugin =
+          pairing !== null || parseBuzzLink(url)?.format === "plugin-install";
         if (epoch !== clientEpoch && !plugin) continue;
         const client = communities.snapshot();
         const invite = parseInviteLink(url);
@@ -324,8 +341,9 @@ export function bindDeepLinks(
           url,
           invite,
           authorization,
+          pairing,
           plugin,
-          invalid: !invite && !authorization && !buzzLink(url),
+          invalid: !invite && !authorization && !pairing && !buzzLink(url),
           launch,
           viewer: client.viewer,
           selected: client.selected,
